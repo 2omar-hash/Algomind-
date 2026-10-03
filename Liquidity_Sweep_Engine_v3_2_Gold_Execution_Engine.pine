@@ -1,0 +1,1150 @@
+//@version=6
+strategy(
+     "Liquidity Sweep Engine v3.2 — Gold Execution Engine",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     process_orders_on_close = true,
+     max_labels_count = 300,
+     max_boxes_count = 100
+)
+
+// ============================================================================
+// 01. MARKET PROFILE
+// ============================================================================
+
+groupProfile = "01. Market Profile"
+
+marketProfile = input.string("Gold", "Market Profile", options = ["Gold", "BTC", "Custom"], group = groupProfile)
+
+customMinScore = input.int(3, "Custom Minimum Liquidity Score", minval = 1, group = groupProfile)
+customClusterATR = input.float(0.20, "Custom Cluster Distance ATR", minval = 0.01, step = 0.01, group = groupProfile)
+customStructureLength = input.int(2, "Custom Internal Structure Pivot", minval = 1, group = groupProfile)
+customMaxConfirmBars = input.int(5, "Custom Max Confirmation Bars", minval = 1, maxval = 20, group = groupProfile)
+customStopBufferATR = input.float(0.15, "Custom Stop Buffer ATR", minval = 0.0, step = 0.05, group = groupProfile)
+
+minimumScore = marketProfile == "Gold" ? 3 : marketProfile == "BTC" ? 4 : customMinScore
+clusterATRMult = marketProfile == "Gold" ? 0.20 : marketProfile == "BTC" ? 0.25 : customClusterATR
+structureLength = marketProfile == "Gold" ? 2 : marketProfile == "BTC" ? 3 : customStructureLength
+maxConfirmationBars = marketProfile == "Gold" ? 5 : marketProfile == "BTC" ? 5 : customMaxConfirmBars
+stopBufferATR = marketProfile == "Gold" ? 0.15 : marketProfile == "BTC" ? 0.25 : customStopBufferATR
+
+// ============================================================================
+// 02. SESSIONS
+// ============================================================================
+
+groupSessions = "02. Sessions"
+
+sessionTimezone = input.string("Etc/UTC", "Session Timezone", group = groupSessions)
+asiaSession = input.session("0000-0600", "Asia Liquidity Session", group = groupSessions)
+londonLiquiditySession = input.session("0700-1000", "London Liquidity Session", group = groupSessions)
+londonEntrySession = input.session("0700-1100", "London Entry Window", group = groupSessions)
+newYorkEntrySession = input.session("1230-1700", "New York Entry Window", group = groupSessions)
+tradeLondon = input.bool(true, "Trade London", group = groupSessions)
+tradeNewYork = input.bool(true, "Trade New York", group = groupSessions)
+
+// ============================================================================
+// 03. LIQUIDITY SOURCES
+// ============================================================================
+
+groupLiquidity = "03. Liquidity Sources"
+
+usePreviousDay = input.bool(true, "Previous Day High / Low", group = groupLiquidity)
+useAsia = input.bool(true, "Asia High / Low", group = groupLiquidity)
+useLondon = input.bool(true, "London High / Low", group = groupLiquidity)
+use5m = input.bool(true, "5M Swings", group = groupLiquidity)
+use15m = input.bool(true, "15M Swings", group = groupLiquidity)
+useEqualHL = input.bool(true, "Equal Highs / Lows", group = groupLiquidity)
+
+// ============================================================================
+// 04. LIQUIDITY WEIGHTS
+// ============================================================================
+
+groupWeights = "04. Liquidity Weights"
+
+weightPreviousDay = input.int(3, "Previous Day", minval = 0, group = groupWeights)
+weightAsia = input.int(2, "Asia", minval = 0, group = groupWeights)
+weightLondon = input.int(2, "London", minval = 0, group = groupWeights)
+weight15m = input.int(2, "15M Swing", minval = 0, group = groupWeights)
+weight5m = input.int(1, "5M Swing", minval = 0, group = groupWeights)
+weightEqual = input.int(1, "Equal High / Low", minval = 0, group = groupWeights)
+
+// ============================================================================
+// 05. SWINGS / EQUAL LIQUIDITY
+// ============================================================================
+
+groupSwings = "05. Swing Detection"
+
+swingLeft = input.int(3, "Liquidity Swing Left", minval = 1, group = groupSwings)
+swingRight = input.int(3, "Liquidity Swing Right", minval = 1, group = groupSwings)
+equalPivotLength = input.int(3, "Equal H/L Pivot Length", minval = 1, group = groupSwings)
+equalToleranceATR = input.float(0.15, "Equal H/L Tolerance ATR", minval = 0.01, step = 0.01, group = groupSwings)
+
+// ============================================================================
+// 06. CONFIRMATION ENGINE
+// ============================================================================
+
+groupConfirmation = "06. Confirmation Engine"
+
+requireMajorSource = input.bool(true, "Require Major Liquidity Source", group = groupConfirmation)
+minimumDisplacementScore = input.int(3, "Minimum Displacement Quality Score", minval = 1, maxval = 5, group = groupConfirmation)
+minimumBodyATR = input.float(0.45, "Minimum Body Size ATR", minval = 0.05, step = 0.05, group = groupConfirmation)
+minimumBodyPercent = input.float(0.55, "Minimum Body / Range", minval = 0.10, maxval = 1.00, step = 0.05, group = groupConfirmation)
+strongClosePercent = input.float(0.20, "Strong Close Edge %", minval = 0.05, maxval = 0.45, step = 0.05, group = groupConfirmation)
+requireBOS = input.bool(true, "Require MSS / BOS", group = groupConfirmation)
+fvgMode = input.string("Bonus", "FVG Treatment", options = ["Off", "Bonus", "Required"], group = groupConfirmation)
+requireZoneReclaim = input.bool(true, "Require Zone Reclaim", group = groupConfirmation)
+
+// ============================================================================
+// 07. HTF REGIME
+// ============================================================================
+
+groupHTF = "07. HTF Regime"
+
+htfTimeframe = input.timeframe("60", "HTF Timeframe", group = groupHTF)
+htfMode = input.string("Structure + EMA", "HTF Bias Mode", options = ["Off", "EMA", "Structure", "Structure + EMA"], group = groupHTF)
+htfEmaLength = input.int(200, "HTF EMA Length", minval = 1, group = groupHTF)
+htfStructurePivot = input.int(3, "HTF Structure Pivot", minval = 1, group = groupHTF)
+allowStrongCountertrend = input.bool(true, "Allow Strong Countertrend Liquidity Event", group = groupHTF)
+countertrendMinScore = input.int(5, "Countertrend Minimum Liquidity Score", minval = 1, group = groupHTF)
+
+// ============================================================================
+// 08. RISK / EXECUTION
+// ============================================================================
+
+groupRisk = "08. Risk & Execution"
+
+atrLength = input.int(14, "ATR Length", minval = 1, group = groupRisk)
+enableLongs = input.bool(true, "Enable Longs", group = groupRisk)
+enableShorts = input.bool(true, "Enable Shorts", group = groupRisk)
+
+exitMode = input.string("Partial + Runner", "Exit Mode", options = ["Fixed", "Partial + Runner"], group = groupRisk)
+fixedTargetR = input.float(2.0, "Fixed Target R", minval = 0.5, step = 0.25, group = groupRisk)
+
+tp1R = input.float(1.25, "TP1 R", minval = 0.5, step = 0.25, group = groupRisk)
+tp1Percent = input.int(50, "TP1 Position %", minval = 10, maxval = 90, group = groupRisk)
+runnerTargetR = input.float(3.0, "Runner Target R", minval = 1.0, step = 0.25, group = groupRisk)
+moveToBreakeven = input.bool(true, "Move Runner Stop To Breakeven After TP1", group = groupRisk)
+useRunnerTrail = input.bool(true, "Use ATR / Structure Runner Trail", group = groupRisk)
+runnerTrailATR = input.float(1.5, "Runner ATR Trail", minval = 0.5, step = 0.25, group = groupRisk)
+
+maxTradesPerDay = input.int(3, "Maximum Trades Per Day", minval = 1, maxval = 20, group = groupRisk)
+lossCooldownBars = input.int(6, "Cooldown Bars After Losing Trade", minval = 0, maxval = 100, group = groupRisk)
+
+// ============================================================================
+// 09. DISPLAY
+// ============================================================================
+
+groupDisplay = "09. Display"
+
+showPreviousDay = input.bool(true, "Show Previous Day H/L", group = groupDisplay)
+showAsia = input.bool(true, "Show Asia H/L", group = groupDisplay)
+showLondon = input.bool(true, "Show London H/L", group = groupDisplay)
+show5m = input.bool(false, "Show 5M Swing Levels", group = groupDisplay)
+show15m = input.bool(true, "Show 15M Swing Levels", group = groupDisplay)
+showEqualHL = input.bool(false, "Show Equal H/L", group = groupDisplay)
+showZones = input.bool(true, "Show Qualified Liquidity Zones", group = groupDisplay)
+showSweepTriangles = input.bool(true, "Show Qualified Sweep Triangles", group = groupDisplay)
+showEntryLabels = input.bool(true, "Show Actual Entry Labels", group = groupDisplay)
+showTradeLevels = input.bool(true, "Show Active Entry / SL / TP", group = groupDisplay)
+showLiquidityLabels = input.bool(true, "Show Right-Edge Liquidity Labels", group = groupDisplay)
+showLabelPrices = input.bool(true, "Show Price In Liquidity Labels", group = groupDisplay)
+liquidityLabelOffset = input.int(3, "Liquidity Label Offset Bars", minval = 1, maxval = 20, group = groupDisplay)
+showLegend = input.bool(true, "Show Liquidity Color Legend", group = groupDisplay)
+showHTFEMA = input.bool(false, "Show HTF EMA", group = groupDisplay)
+
+// ============================================================================
+// CORE
+// ============================================================================
+
+isFiveMinute = timeframe.isminutes and timeframe.multiplier == 5
+atr = ta.atr(atrLength)
+clusterDistance = atr * clusterATRMult
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+sweepLow(float level) =>
+    not na(level) and low < level and close > level
+
+sweepHigh(float level) =>
+    not na(level) and high > level and close < level
+
+nearLevel(float levelA, float levelB, float distance) =>
+    not na(levelA) and not na(levelB) and math.abs(levelA - levelB) <= distance
+
+liquidityText(string name, float price) =>
+    showLabelPrices ? name + "  " + str.tostring(price, format.mintick) : name
+
+// ============================================================================
+// SESSION STATE
+// ============================================================================
+
+inAsia = not na(time(timeframe.period, asiaSession, sessionTimezone))
+inLondonLiquidity = not na(time(timeframe.period, londonLiquiditySession, sessionTimezone))
+inLondonEntry = not na(time(timeframe.period, londonEntrySession, sessionTimezone))
+inNewYorkEntry = not na(time(timeframe.period, newYorkEntrySession, sessionTimezone))
+
+entrySessionOK = (tradeLondon and inLondonEntry) or (tradeNewYork and inNewYorkEntry)
+
+asiaStart = inAsia and not inAsia[1]
+londonLiquidityStart = inLondonLiquidity and not inLondonLiquidity[1]
+
+// ============================================================================
+// PREVIOUS DAY HIGH / LOW
+// ============================================================================
+
+previousDayHigh = request.security(syminfo.tickerid, "D", high[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+previousDayLow = request.security(syminfo.tickerid, "D", low[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+newDay = ta.change(time("D")) != 0
+
+var bool pdhConsumed = false
+var bool pdlConsumed = false
+
+if newDay
+    pdhConsumed := false
+    pdlConsumed := false
+
+plotPDH = (showPreviousDay and usePreviousDay and not pdhConsumed and not newDay) ? previousDayHigh : na
+plotPDL = (showPreviousDay and usePreviousDay and not pdlConsumed and not newDay) ? previousDayLow : na
+
+plot(plotPDH, "Previous Day High", color = color.new(color.red, 20), linewidth = 2, style = plot.style_linebr)
+plot(plotPDL, "Previous Day Low", color = color.new(color.green, 20), linewidth = 2, style = plot.style_linebr)
+
+// ============================================================================
+// ASIA LIQUIDITY
+// ============================================================================
+
+var float asiaHigh = na
+var float asiaLow = na
+var bool asiaHighConsumed = false
+var bool asiaLowConsumed = false
+
+if asiaStart
+    asiaHigh := high
+    asiaLow := low
+    asiaHighConsumed := false
+    asiaLowConsumed := false
+else if inAsia
+    asiaHigh := math.max(nz(asiaHigh, high), high)
+    asiaLow := math.min(nz(asiaLow, low), low)
+
+plotAsiaHigh = (showAsia and useAsia and not inAsia and not asiaHighConsumed) ? asiaHigh : na
+plotAsiaLow = (showAsia and useAsia and not inAsia and not asiaLowConsumed) ? asiaLow : na
+
+plot(plotAsiaHigh, "Asia High", color = color.aqua, linewidth = 1, style = plot.style_linebr)
+plot(plotAsiaLow, "Asia Low", color = color.aqua, linewidth = 1, style = plot.style_linebr)
+
+// ============================================================================
+// LONDON LIQUIDITY
+// ============================================================================
+
+var float londonHigh = na
+var float londonLow = na
+var bool londonHighConsumed = false
+var bool londonLowConsumed = false
+
+if londonLiquidityStart
+    londonHigh := high
+    londonLow := low
+    londonHighConsumed := false
+    londonLowConsumed := false
+else if inLondonLiquidity
+    londonHigh := math.max(nz(londonHigh, high), high)
+    londonLow := math.min(nz(londonLow, low), low)
+
+plotLondonHigh = (showLondon and useLondon and not inLondonLiquidity and not londonHighConsumed) ? londonHigh : na
+plotLondonLow = (showLondon and useLondon and not inLondonLiquidity and not londonLowConsumed) ? londonLow : na
+
+plot(plotLondonHigh, "London High", color = color.orange, linewidth = 1, style = plot.style_linebr)
+plot(plotLondonLow, "London Low", color = color.orange, linewidth = 1, style = plot.style_linebr)
+
+// ============================================================================
+// 5M SWINGS
+// ============================================================================
+
+pivot5mHigh = ta.pivothigh(high, swingLeft, swingRight)
+pivot5mLow = ta.pivotlow(low, swingLeft, swingRight)
+
+new5mHigh = not na(pivot5mHigh)
+new5mLow = not na(pivot5mLow)
+
+var float swing5mHigh = na
+var float swing5mLow = na
+var bool swing5mHighConsumed = false
+var bool swing5mLowConsumed = false
+
+if new5mHigh
+    swing5mHigh := pivot5mHigh
+    swing5mHighConsumed := false
+
+if new5mLow
+    swing5mLow := pivot5mLow
+    swing5mLowConsumed := false
+
+plot5mHigh = (show5m and use5m and not swing5mHighConsumed and not new5mHigh) ? swing5mHigh : na
+plot5mLow = (show5m and use5m and not swing5mLowConsumed and not new5mLow) ? swing5mLow : na
+
+plot(plot5mHigh, "5M Swing High", color = color.blue, linewidth = 1, style = plot.style_linebr)
+plot(plot5mLow, "5M Swing Low", color = color.blue, linewidth = 1, style = plot.style_linebr)
+
+// ============================================================================
+// 15M SWINGS
+// ============================================================================
+
+pivot15mHigh = request.security(syminfo.tickerid, "15", ta.pivothigh(high, swingLeft, swingRight), gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
+pivot15mLow = request.security(syminfo.tickerid, "15", ta.pivotlow(low, swingLeft, swingRight), gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
+
+new15mHigh = not na(pivot15mHigh)
+new15mLow = not na(pivot15mLow)
+
+var float swing15mHigh = na
+var float swing15mLow = na
+var bool swing15mHighConsumed = false
+var bool swing15mLowConsumed = false
+
+if new15mHigh
+    swing15mHigh := pivot15mHigh
+    swing15mHighConsumed := false
+
+if new15mLow
+    swing15mLow := pivot15mLow
+    swing15mLowConsumed := false
+
+plot15mHigh = (show15m and use15m and not swing15mHighConsumed and not new15mHigh) ? swing15mHigh : na
+plot15mLow = (show15m and use15m and not swing15mLowConsumed and not new15mLow) ? swing15mLow : na
+
+plot(plot15mHigh, "15M Swing High", color = color.purple, linewidth = 2, style = plot.style_linebr)
+plot(plot15mLow, "15M Swing Low", color = color.purple, linewidth = 2, style = plot.style_linebr)
+
+// ============================================================================
+// EQUAL HIGHS / LOWS
+// ============================================================================
+
+equalPivotHigh = ta.pivothigh(high, equalPivotLength, equalPivotLength)
+equalPivotLow = ta.pivotlow(low, equalPivotLength, equalPivotLength)
+
+var float previousEqualHighPivot = na
+var float previousEqualLowPivot = na
+var float equalHigh = na
+var float equalLow = na
+var bool equalHighConsumed = false
+var bool equalLowConsumed = false
+
+newEqualHigh = false
+newEqualLow = false
+
+if not na(equalPivotHigh)
+    equalHighATR = atr[equalPivotLength]
+    if not na(previousEqualHighPivot) and not na(equalHighATR)
+        differenceHigh = math.abs(equalPivotHigh - previousEqualHighPivot)
+        if differenceHigh <= equalHighATR * equalToleranceATR
+            equalHigh := (equalPivotHigh + previousEqualHighPivot) / 2.0
+            equalHighConsumed := false
+            newEqualHigh := true
+    previousEqualHighPivot := equalPivotHigh
+
+if not na(equalPivotLow)
+    equalLowATR = atr[equalPivotLength]
+    if not na(previousEqualLowPivot) and not na(equalLowATR)
+        differenceLow = math.abs(equalPivotLow - previousEqualLowPivot)
+        if differenceLow <= equalLowATR * equalToleranceATR
+            equalLow := (equalPivotLow + previousEqualLowPivot) / 2.0
+            equalLowConsumed := false
+            newEqualLow := true
+    previousEqualLowPivot := equalPivotLow
+
+plotEqualHigh = (showEqualHL and useEqualHL and not equalHighConsumed and not newEqualHigh) ? equalHigh : na
+plotEqualLow = (showEqualHL and useEqualHL and not equalLowConsumed and not newEqualLow) ? equalLow : na
+
+plot(plotEqualHigh, "Equal High", color = color.fuchsia, linewidth = 1, style = plot.style_linebr)
+plot(plotEqualLow, "Equal Low", color = color.fuchsia, linewidth = 1, style = plot.style_linebr)
+
+// ============================================================================
+// 5M INTERNAL STRUCTURE
+// ============================================================================
+
+internalPivotHigh = ta.pivothigh(high, structureLength, structureLength)
+internalPivotLow = ta.pivotlow(low, structureLength, structureLength)
+
+var float latestInternalHigh = na
+var float latestInternalLow = na
+
+if not na(internalPivotHigh)
+    latestInternalHigh := internalPivotHigh
+
+if not na(internalPivotLow)
+    latestInternalLow := internalPivotLow
+
+// ============================================================================
+// HTF REGIME — EMA + CONFIRMED HH/HL OR LH/LL
+// ============================================================================
+
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htfEMA = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfEmaLength), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htfEMA1 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfEmaLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+htfPivotHighRaw = request.security(syminfo.tickerid, htfTimeframe, ta.pivothigh(high, htfStructurePivot, htfStructurePivot), gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
+htfPivotLowRaw = request.security(syminfo.tickerid, htfTimeframe, ta.pivotlow(low, htfStructurePivot, htfStructurePivot), gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
+
+var float htfLastHigh = na
+var float htfPrevHigh = na
+var float htfLastLow = na
+var float htfPrevLow = na
+
+if not na(htfPivotHighRaw)
+    htfPrevHigh := htfLastHigh
+    htfLastHigh := htfPivotHighRaw
+
+if not na(htfPivotLowRaw)
+    htfPrevLow := htfLastLow
+    htfLastLow := htfPivotLowRaw
+
+htfBullStructure = not na(htfLastHigh) and not na(htfPrevHigh) and not na(htfLastLow) and not na(htfPrevLow) and htfLastHigh > htfPrevHigh and htfLastLow > htfPrevLow
+htfBearStructure = not na(htfLastHigh) and not na(htfPrevHigh) and not na(htfLastLow) and not na(htfPrevLow) and htfLastHigh < htfPrevHigh and htfLastLow < htfPrevLow
+
+htfBullEMA = htfClose > htfEMA and htfEMA >= htfEMA1
+htfBearEMA = htfClose < htfEMA and htfEMA <= htfEMA1
+
+htfLongOK = htfMode == "Off" ? true : htfMode == "EMA" ? htfBullEMA : htfMode == "Structure" ? htfBullStructure : htfBullEMA and htfBullStructure
+htfShortOK = htfMode == "Off" ? true : htfMode == "EMA" ? htfBearEMA : htfMode == "Structure" ? htfBearStructure : htfBearEMA and htfBearStructure
+
+plot(showHTFEMA ? htfEMA : na, "HTF EMA", color = color.yellow, linewidth = 2)
+
+// ============================================================================
+// RAW SWEEPS
+// ============================================================================
+
+rawPDL = usePreviousDay and not pdlConsumed and sweepLow(previousDayLow)
+rawAsiaLow = useAsia and not inAsia and not asiaLowConsumed and sweepLow(asiaLow)
+rawLondonLow = useLondon and not inLondonLiquidity and not londonLowConsumed and sweepLow(londonLow)
+raw5mLow = use5m and not swing5mLowConsumed and sweepLow(swing5mLow)
+raw15mLow = use15m and not swing15mLowConsumed and sweepLow(swing15mLow)
+rawEqualLow = useEqualHL and not equalLowConsumed and sweepLow(equalLow)
+
+rawPDH = usePreviousDay and not pdhConsumed and sweepHigh(previousDayHigh)
+rawAsiaHigh = useAsia and not inAsia and not asiaHighConsumed and sweepHigh(asiaHigh)
+rawLondonHigh = useLondon and not inLondonLiquidity and not londonHighConsumed and sweepHigh(londonHigh)
+raw5mHigh = use5m and not swing5mHighConsumed and sweepHigh(swing5mHigh)
+raw15mHigh = use15m and not swing15mHighConsumed and sweepHigh(swing15mHigh)
+rawEqualHigh = useEqualHL and not equalHighConsumed and sweepHigh(equalHigh)
+
+// ============================================================================
+// PRIMARY ANCHORS
+// ============================================================================
+
+float bullAnchor = na
+string bullPrimaryName = ""
+
+if rawPDL
+    bullAnchor := previousDayLow
+    bullPrimaryName := "Previous Day Low"
+else if rawAsiaLow
+    bullAnchor := asiaLow
+    bullPrimaryName := "Asia Low"
+else if rawLondonLow
+    bullAnchor := londonLow
+    bullPrimaryName := "London Low"
+else if raw15mLow
+    bullAnchor := swing15mLow
+    bullPrimaryName := "15M Swing Low"
+else if raw5mLow
+    bullAnchor := swing5mLow
+    bullPrimaryName := "5M Swing Low"
+else if rawEqualLow
+    bullAnchor := equalLow
+    bullPrimaryName := "Equal Lows"
+
+float bearAnchor = na
+string bearPrimaryName = ""
+
+if rawPDH
+    bearAnchor := previousDayHigh
+    bearPrimaryName := "Previous Day High"
+else if rawAsiaHigh
+    bearAnchor := asiaHigh
+    bearPrimaryName := "Asia High"
+else if rawLondonHigh
+    bearAnchor := londonHigh
+    bearPrimaryName := "London High"
+else if raw15mHigh
+    bearAnchor := swing15mHigh
+    bearPrimaryName := "15M Swing High"
+else if raw5mHigh
+    bearAnchor := swing5mHigh
+    bearPrimaryName := "5M Swing High"
+else if rawEqualHigh
+    bearAnchor := equalHigh
+    bearPrimaryName := "Equal Highs"
+
+// ============================================================================
+// CLUSTERS
+// ============================================================================
+
+bullPD = rawPDL and nearLevel(previousDayLow, bullAnchor, clusterDistance)
+bullAsia = rawAsiaLow and nearLevel(asiaLow, bullAnchor, clusterDistance)
+bullLondon = rawLondonLow and nearLevel(londonLow, bullAnchor, clusterDistance)
+bull5m = raw5mLow and nearLevel(swing5mLow, bullAnchor, clusterDistance)
+bull15m = raw15mLow and nearLevel(swing15mLow, bullAnchor, clusterDistance)
+bullEqual = rawEqualLow and nearLevel(equalLow, bullAnchor, clusterDistance)
+
+bearPD = rawPDH and nearLevel(previousDayHigh, bearAnchor, clusterDistance)
+bearAsia = rawAsiaHigh and nearLevel(asiaHigh, bearAnchor, clusterDistance)
+bearLondon = rawLondonHigh and nearLevel(londonHigh, bearAnchor, clusterDistance)
+bear5m = raw5mHigh and nearLevel(swing5mHigh, bearAnchor, clusterDistance)
+bear15m = raw15mHigh and nearLevel(swing15mHigh, bearAnchor, clusterDistance)
+bearEqual = rawEqualHigh and nearLevel(equalHigh, bearAnchor, clusterDistance)
+
+int bullScore = 0
+bullScore += bullPD ? weightPreviousDay : 0
+bullScore += bullAsia ? weightAsia : 0
+bullScore += bullLondon ? weightLondon : 0
+bullScore += bull15m ? weight15m : 0
+bullScore += bull5m ? weight5m : 0
+bullScore += bullEqual ? weightEqual : 0
+
+int bearScore = 0
+bearScore += bearPD ? weightPreviousDay : 0
+bearScore += bearAsia ? weightAsia : 0
+bearScore += bearLondon ? weightLondon : 0
+bearScore += bear15m ? weight15m : 0
+bearScore += bear5m ? weight5m : 0
+bearScore += bearEqual ? weightEqual : 0
+
+bullHasMajor = bullPD or bullAsia or bullLondon or bull15m
+bearHasMajor = bearPD or bearAsia or bearLondon or bear15m
+
+// ============================================================================
+// EVENT ZONES
+// ============================================================================
+
+float bullZoneLow = na
+float bullZoneHigh = na
+
+if not na(bullAnchor)
+    bullZoneLow := bullAnchor
+    bullZoneHigh := bullAnchor
+    if bullPD
+        bullZoneLow := math.min(bullZoneLow, previousDayLow)
+        bullZoneHigh := math.max(bullZoneHigh, previousDayLow)
+    if bullAsia
+        bullZoneLow := math.min(bullZoneLow, asiaLow)
+        bullZoneHigh := math.max(bullZoneHigh, asiaLow)
+    if bullLondon
+        bullZoneLow := math.min(bullZoneLow, londonLow)
+        bullZoneHigh := math.max(bullZoneHigh, londonLow)
+    if bull5m
+        bullZoneLow := math.min(bullZoneLow, swing5mLow)
+        bullZoneHigh := math.max(bullZoneHigh, swing5mLow)
+    if bull15m
+        bullZoneLow := math.min(bullZoneLow, swing15mLow)
+        bullZoneHigh := math.max(bullZoneHigh, swing15mLow)
+    if bullEqual
+        bullZoneLow := math.min(bullZoneLow, equalLow)
+        bullZoneHigh := math.max(bullZoneHigh, equalLow)
+
+float bearZoneLow = na
+float bearZoneHigh = na
+
+if not na(bearAnchor)
+    bearZoneLow := bearAnchor
+    bearZoneHigh := bearAnchor
+    if bearPD
+        bearZoneLow := math.min(bearZoneLow, previousDayHigh)
+        bearZoneHigh := math.max(bearZoneHigh, previousDayHigh)
+    if bearAsia
+        bearZoneLow := math.min(bearZoneLow, asiaHigh)
+        bearZoneHigh := math.max(bearZoneHigh, asiaHigh)
+    if bearLondon
+        bearZoneLow := math.min(bearZoneLow, londonHigh)
+        bearZoneHigh := math.max(bearZoneHigh, londonHigh)
+    if bear5m
+        bearZoneLow := math.min(bearZoneLow, swing5mHigh)
+        bearZoneHigh := math.max(bearZoneHigh, swing5mHigh)
+    if bear15m
+        bearZoneLow := math.min(bearZoneLow, swing15mHigh)
+        bearZoneHigh := math.max(bearZoneHigh, swing15mHigh)
+    if bearEqual
+        bearZoneLow := math.min(bearZoneLow, equalHigh)
+        bearZoneHigh := math.max(bearZoneHigh, equalHigh)
+
+minimumZoneSize = atr * 0.03
+
+if not na(bullZoneLow) and not na(bullZoneHigh) and bullZoneHigh - bullZoneLow < minimumZoneSize
+    bullZoneLow := bullZoneLow - minimumZoneSize * 0.5
+    bullZoneHigh := bullZoneHigh + minimumZoneSize * 0.5
+
+if not na(bearZoneLow) and not na(bearZoneHigh) and bearZoneHigh - bearZoneLow < minimumZoneSize
+    bearZoneLow := bearZoneLow - minimumZoneSize * 0.5
+    bearZoneHigh := bearZoneHigh + minimumZoneSize * 0.5
+
+bullMajorOK = not requireMajorSource or bullHasMajor
+bearMajorOK = not requireMajorSource or bearHasMajor
+
+bullQualified = isFiveMinute and not na(bullAnchor) and bullScore >= minimumScore and bullMajorOK
+bearQualified = isFiveMinute and not na(bearAnchor) and bearScore >= minimumScore and bearMajorOK
+
+bullEvent = bullQualified and (not bearQualified or bullScore > bearScore)
+bearEvent = bearQualified and (not bullQualified or bearScore > bullScore)
+
+// ============================================================================
+// CONSUME SWEPT LEVELS
+// ============================================================================
+
+if rawPDL
+    pdlConsumed := true
+if rawPDH
+    pdhConsumed := true
+if rawAsiaLow
+    asiaLowConsumed := true
+if rawAsiaHigh
+    asiaHighConsumed := true
+if rawLondonLow
+    londonLowConsumed := true
+if rawLondonHigh
+    londonHighConsumed := true
+if raw5mLow
+    swing5mLowConsumed := true
+if raw5mHigh
+    swing5mHighConsumed := true
+if raw15mLow
+    swing15mLowConsumed := true
+if raw15mHigh
+    swing15mHighConsumed := true
+if rawEqualLow
+    equalLowConsumed := true
+if rawEqualHigh
+    equalHighConsumed := true
+
+// ============================================================================
+// EVENT STORAGE
+// ============================================================================
+
+var int bullEventBar = na
+var int bearEventBar = na
+
+var float bullSweepExtreme = na
+var float bearSweepExtreme = na
+
+var float storedBullZoneLow = na
+var float storedBullZoneHigh = na
+var float storedBearZoneLow = na
+var float storedBearZoneHigh = na
+
+var float bullStructureLevel = na
+var float bearStructureLevel = na
+
+var float bullEventATR = na
+var float bearEventATR = na
+
+var int storedBullScore = 0
+var int storedBearScore = 0
+
+var string storedBullName = ""
+var string storedBearName = ""
+
+var box bullZoneBox = na
+var box bearZoneBox = na
+
+if bullEvent
+    bullEventBar := bar_index
+    bullSweepExtreme := low
+    storedBullZoneLow := bullZoneLow
+    storedBullZoneHigh := bullZoneHigh
+    bullStructureLevel := nz(latestInternalHigh, high[1])
+    bullEventATR := atr
+    storedBullScore := bullScore
+    storedBullName := bullPrimaryName
+
+    bearEventBar := na
+    bearSweepExtreme := na
+    storedBearZoneLow := na
+    storedBearZoneHigh := na
+    bearStructureLevel := na
+    bearEventATR := na
+    storedBearScore := 0
+    storedBearName := ""
+
+    if not na(bearZoneBox)
+        box.delete(bearZoneBox)
+        bearZoneBox := na
+
+    if showZones
+        if not na(bullZoneBox)
+            box.delete(bullZoneBox)
+        bullZoneBox := box.new(left = bar_index, top = storedBullZoneHigh, right = bar_index + maxConfirmationBars, bottom = storedBullZoneLow, xloc = xloc.bar_index, border_color = color.new(color.green, 10), bgcolor = color.new(color.green, 88), text = "SSL ZONE | Score " + str.tostring(storedBullScore), text_color = color.white, text_size = size.small)
+
+if bearEvent
+    bearEventBar := bar_index
+    bearSweepExtreme := high
+    storedBearZoneLow := bearZoneLow
+    storedBearZoneHigh := bearZoneHigh
+    bearStructureLevel := nz(latestInternalLow, low[1])
+    bearEventATR := atr
+    storedBearScore := bearScore
+    storedBearName := bearPrimaryName
+
+    bullEventBar := na
+    bullSweepExtreme := na
+    storedBullZoneLow := na
+    storedBullZoneHigh := na
+    bullStructureLevel := na
+    bullEventATR := na
+    storedBullScore := 0
+    storedBullName := ""
+
+    if not na(bullZoneBox)
+        box.delete(bullZoneBox)
+        bullZoneBox := na
+
+    if showZones
+        if not na(bearZoneBox)
+            box.delete(bearZoneBox)
+        bearZoneBox := box.new(left = bar_index, top = storedBearZoneHigh, right = bar_index + maxConfirmationBars, bottom = storedBearZoneLow, xloc = xloc.bar_index, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 88), text = "BSL ZONE | Score " + str.tostring(storedBearScore), text_color = color.white, text_size = size.small)
+
+// ============================================================================
+// PENDING SETUPS
+// ============================================================================
+
+bullBarsSinceEvent = not na(bullEventBar) ? bar_index - bullEventBar : na
+bearBarsSinceEvent = not na(bearEventBar) ? bar_index - bearEventBar : na
+
+bullSetupActive = not na(bullEventBar) and bullBarsSinceEvent >= 1 and bullBarsSinceEvent <= maxConfirmationBars
+bearSetupActive = not na(bearEventBar) and bearBarsSinceEvent >= 1 and bearBarsSinceEvent <= maxConfirmationBars
+
+if bullSetupActive and low < bullSweepExtreme
+    bullEventBar := na
+    bullSweepExtreme := na
+    storedBullZoneLow := na
+    storedBullZoneHigh := na
+    bullStructureLevel := na
+    bullEventATR := na
+    storedBullScore := 0
+    storedBullName := ""
+    if not na(bullZoneBox)
+        box.set_right(bullZoneBox, bar_index)
+
+if bearSetupActive and high > bearSweepExtreme
+    bearEventBar := na
+    bearSweepExtreme := na
+    storedBearZoneLow := na
+    storedBearZoneHigh := na
+    bearStructureLevel := na
+    bearEventATR := na
+    storedBearScore := 0
+    storedBearName := ""
+    if not na(bearZoneBox)
+        box.set_right(bearZoneBox, bar_index)
+
+// ============================================================================
+// DISPLACEMENT QUALITY + BOS + FVG
+// ============================================================================
+
+candleRange = high - low
+candleBody = math.abs(close - open)
+bodyPercent = candleRange > 0 ? candleBody / candleRange : 0.0
+bullCloseLocation = candleRange > 0 ? (high - close) / candleRange : 1.0
+bearCloseLocation = candleRange > 0 ? (close - low) / candleRange : 1.0
+
+bullBOS = bullSetupActive and not na(bullStructureLevel) and close > bullStructureLevel
+bearBOS = bearSetupActive and not na(bearStructureLevel) and close < bearStructureLevel
+
+bullishFVG = bar_index >= 2 and low > high[2]
+bearishFVG = bar_index >= 2 and high < low[2]
+
+int bullDisplacementScore = 0
+bullDisplacementScore += close > open and candleBody >= atr * minimumBodyATR ? 1 : 0
+bullDisplacementScore += close > open and bodyPercent >= minimumBodyPercent ? 1 : 0
+bullDisplacementScore += close > open and bullCloseLocation <= strongClosePercent ? 1 : 0
+bullDisplacementScore += bullBOS ? 1 : 0
+bullDisplacementScore += bullishFVG ? 1 : 0
+
+int bearDisplacementScore = 0
+bearDisplacementScore += close < open and candleBody >= atr * minimumBodyATR ? 1 : 0
+bearDisplacementScore += close < open and bodyPercent >= minimumBodyPercent ? 1 : 0
+bearDisplacementScore += close < open and bearCloseLocation <= strongClosePercent ? 1 : 0
+bearDisplacementScore += bearBOS ? 1 : 0
+bearDisplacementScore += bearishFVG ? 1 : 0
+
+bullZoneReclaimed = bullSetupActive and not na(storedBullZoneHigh) and close > storedBullZoneHigh
+bearZoneReclaimed = bearSetupActive and not na(storedBearZoneLow) and close < storedBearZoneLow
+
+bullBOSOK = not requireBOS or bullBOS
+bearBOSOK = not requireBOS or bearBOS
+bullFVGOK = fvgMode == "Required" ? bullishFVG : true
+bearFVGOK = fvgMode == "Required" ? bearishFVG : true
+bullZoneOK = not requireZoneReclaim or bullZoneReclaimed
+bearZoneOK = not requireZoneReclaim or bearZoneReclaimed
+
+bullQualityOK = bullDisplacementScore >= minimumDisplacementScore and bullFVGOK
+bearQualityOK = bearDisplacementScore >= minimumDisplacementScore and bearFVGOK
+
+bullRegimeOK = htfLongOK or (allowStrongCountertrend and storedBullScore >= countertrendMinScore)
+bearRegimeOK = htfShortOK or (allowStrongCountertrend and storedBearScore >= countertrendMinScore)
+
+// ============================================================================
+// DAILY LIMIT + COOLDOWN
+// ============================================================================
+
+var int tradesToday = 0
+var int cooldownUntilBar = na
+var int closedTradesSeen = 0
+
+if newDay
+    tradesToday := 0
+
+if strategy.closedtrades > closedTradesSeen
+    lastClosedIndex = strategy.closedtrades - 1
+    lastProfit = strategy.closedtrades.profit(lastClosedIndex)
+    if lastProfit < 0
+        cooldownUntilBar := bar_index + lossCooldownBars
+    closedTradesSeen := strategy.closedtrades
+
+cooldownOK = na(cooldownUntilBar) or bar_index >= cooldownUntilBar
+dailyTradeLimitOK = tradesToday < maxTradesPerDay
+
+// ============================================================================
+// FINAL ENTRY CONDITIONS
+// ============================================================================
+
+longSignal = isFiveMinute and enableLongs and strategy.position_size == 0 and bullSetupActive and bullQualityOK and bullBOSOK and bullZoneOK and bullRegimeOK and entrySessionOK and cooldownOK and dailyTradeLimitOK
+shortSignal = isFiveMinute and enableShorts and strategy.position_size == 0 and bearSetupActive and bearQualityOK and bearBOSOK and bearZoneOK and bearRegimeOK and entrySessionOK and cooldownOK and dailyTradeLimitOK
+
+// ============================================================================
+// TRADE STATE
+// ============================================================================
+
+var int activeDirection = 0
+
+var float activeEntry = na
+var float activeInitialStop = na
+var float activeStop = na
+var float activeTP1 = na
+var float activeRunnerTarget = na
+var float activeRisk = na
+
+var bool tp1Hit = false
+var bool tradeVisualActive = false
+
+// ============================================================================
+// LONG ENTRY
+// ============================================================================
+
+if longSignal
+    longEntry = close
+    longStop = bullSweepExtreme - bullEventATR * stopBufferATR
+    longRisk = longEntry - longStop
+
+    if longRisk > syminfo.mintick
+        activeDirection := 1
+        activeEntry := longEntry
+        activeInitialStop := longStop
+        activeStop := longStop
+        activeRisk := longRisk
+        activeTP1 := longEntry + longRisk * tp1R
+        activeRunnerTarget := longEntry + longRisk * runnerTargetR
+        tp1Hit := false
+        tradeVisualActive := true
+        tradesToday += 1
+
+        strategy.entry("Long", strategy.long)
+
+        if exitMode == "Fixed"
+            strategy.exit("Long Fixed", from_entry = "Long", stop = longStop, limit = longEntry + longRisk * fixedTargetR)
+        else
+            strategy.exit("Long TP1", from_entry = "Long", qty_percent = tp1Percent, stop = longStop, limit = activeTP1)
+            strategy.exit("Long Runner", from_entry = "Long", qty_percent = 100 - tp1Percent, stop = longStop, limit = activeRunnerTarget)
+
+        if showEntryLabels
+            label.new(bar_index, low, "LONG\n" + storedBullName + "\nLQ " + str.tostring(storedBullScore) + " | DISP " + str.tostring(bullDisplacementScore) + "/5", style = label.style_label_up, color = color.green, textcolor = color.white, size = size.small)
+
+        if not na(bullZoneBox)
+            box.set_right(bullZoneBox, bar_index)
+
+        bullEventBar := na
+        bullSweepExtreme := na
+        storedBullZoneLow := na
+        storedBullZoneHigh := na
+        bullStructureLevel := na
+        bullEventATR := na
+        storedBullScore := 0
+        storedBullName := ""
+
+// ============================================================================
+// SHORT ENTRY
+// ============================================================================
+
+else if shortSignal
+    shortEntry = close
+    shortStop = bearSweepExtreme + bearEventATR * stopBufferATR
+    shortRisk = shortStop - shortEntry
+
+    if shortRisk > syminfo.mintick
+        activeDirection := -1
+        activeEntry := shortEntry
+        activeInitialStop := shortStop
+        activeStop := shortStop
+        activeRisk := shortRisk
+        activeTP1 := shortEntry - shortRisk * tp1R
+        activeRunnerTarget := shortEntry - shortRisk * runnerTargetR
+        tp1Hit := false
+        tradeVisualActive := true
+        tradesToday += 1
+
+        strategy.entry("Short", strategy.short)
+
+        if exitMode == "Fixed"
+            strategy.exit("Short Fixed", from_entry = "Short", stop = shortStop, limit = shortEntry - shortRisk * fixedTargetR)
+        else
+            strategy.exit("Short TP1", from_entry = "Short", qty_percent = tp1Percent, stop = shortStop, limit = activeTP1)
+            strategy.exit("Short Runner", from_entry = "Short", qty_percent = 100 - tp1Percent, stop = shortStop, limit = activeRunnerTarget)
+
+        if showEntryLabels
+            label.new(bar_index, high, "SHORT\n" + storedBearName + "\nLQ " + str.tostring(storedBearScore) + " | DISP " + str.tostring(bearDisplacementScore) + "/5", style = label.style_label_down, color = color.red, textcolor = color.white, size = size.small)
+
+        if not na(bearZoneBox)
+            box.set_right(bearZoneBox, bar_index)
+
+        bearEventBar := na
+        bearSweepExtreme := na
+        storedBearZoneLow := na
+        storedBearZoneHigh := na
+        bearStructureLevel := na
+        bearEventATR := na
+        storedBearScore := 0
+        storedBearName := ""
+
+// ============================================================================
+// PARTIAL TP / BREAKEVEN / RUNNER MANAGEMENT
+// ============================================================================
+
+if exitMode == "Partial + Runner" and strategy.position_size > 0 and activeDirection == 1
+    if not tp1Hit and high >= activeTP1 and low > activeInitialStop
+        tp1Hit := true
+
+    longTrailATR = close - atr * runnerTrailATR
+    longStructureTrail = not na(latestInternalLow) and latestInternalLow < close ? latestInternalLow : na
+    longRunnerStop = activeInitialStop
+
+    if tp1Hit and moveToBreakeven
+        longRunnerStop := math.max(longRunnerStop, activeEntry)
+
+    if tp1Hit and useRunnerTrail
+        longRunnerStop := math.max(longRunnerStop, longTrailATR)
+        if not na(longStructureTrail)
+            longRunnerStop := math.max(longRunnerStop, longStructureTrail)
+
+    longRunnerStop := math.min(longRunnerStop, close - syminfo.mintick)
+    activeStop := tp1Hit ? longRunnerStop : activeInitialStop
+
+    strategy.exit("Long TP1", from_entry = "Long", qty_percent = tp1Percent, stop = activeInitialStop, limit = activeTP1)
+    strategy.exit("Long Runner", from_entry = "Long", qty_percent = 100 - tp1Percent, stop = activeStop, limit = activeRunnerTarget)
+
+if exitMode == "Partial + Runner" and strategy.position_size < 0 and activeDirection == -1
+    if not tp1Hit and low <= activeTP1 and high < activeInitialStop
+        tp1Hit := true
+
+    shortTrailATR = close + atr * runnerTrailATR
+    shortStructureTrail = not na(latestInternalHigh) and latestInternalHigh > close ? latestInternalHigh : na
+    shortRunnerStop = activeInitialStop
+
+    if tp1Hit and moveToBreakeven
+        shortRunnerStop := math.min(shortRunnerStop, activeEntry)
+
+    if tp1Hit and useRunnerTrail
+        shortRunnerStop := math.min(shortRunnerStop, shortTrailATR)
+        if not na(shortStructureTrail)
+            shortRunnerStop := math.min(shortRunnerStop, shortStructureTrail)
+
+    shortRunnerStop := math.max(shortRunnerStop, close + syminfo.mintick)
+    activeStop := tp1Hit ? shortRunnerStop : activeInitialStop
+
+    strategy.exit("Short TP1", from_entry = "Short", qty_percent = tp1Percent, stop = activeInitialStop, limit = activeTP1)
+    strategy.exit("Short Runner", from_entry = "Short", qty_percent = 100 - tp1Percent, stop = activeStop, limit = activeRunnerTarget)
+
+// ============================================================================
+// EXPIRE UNCONFIRMED EVENTS
+// ============================================================================
+
+if not na(bullEventBar) and bar_index - bullEventBar > maxConfirmationBars
+    bullEventBar := na
+    bullSweepExtreme := na
+    storedBullZoneLow := na
+    storedBullZoneHigh := na
+    bullStructureLevel := na
+    bullEventATR := na
+    storedBullScore := 0
+    storedBullName := ""
+    if not na(bullZoneBox)
+        box.set_right(bullZoneBox, bar_index)
+
+if not na(bearEventBar) and bar_index - bearEventBar > maxConfirmationBars
+    bearEventBar := na
+    bearSweepExtreme := na
+    storedBearZoneLow := na
+    storedBearZoneHigh := na
+    bearStructureLevel := na
+    bearEventATR := na
+    storedBearScore := 0
+    storedBearName := ""
+    if not na(bearZoneBox)
+        box.set_right(bearZoneBox, bar_index)
+
+// ============================================================================
+// RESET TRADE VISUAL STATE AFTER FULL CLOSE
+// ============================================================================
+
+tradeJustClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if tradeJustClosed
+    activeDirection := 0
+    activeEntry := na
+    activeInitialStop := na
+    activeStop := na
+    activeTP1 := na
+    activeRunnerTarget := na
+    activeRisk := na
+    tp1Hit := false
+    tradeVisualActive := false
+
+// ============================================================================
+// TRADE LEVELS
+// ============================================================================
+
+plot(showTradeLevels and tradeVisualActive ? activeEntry : na, "Active Entry", color = color.white, linewidth = 1, style = plot.style_linebr)
+plot(showTradeLevels and tradeVisualActive ? activeStop : na, "Active Stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(showTradeLevels and tradeVisualActive and exitMode == "Partial + Runner" ? activeTP1 : na, "TP1", color = color.yellow, linewidth = 1, style = plot.style_linebr)
+plot(showTradeLevels and tradeVisualActive ? activeRunnerTarget : na, "Runner Target", color = color.green, linewidth = 2, style = plot.style_linebr)
+
+// ============================================================================
+// QUALIFIED SWEEP TRIANGLES
+// ============================================================================
+
+plotshape(showSweepTriangles and bullEvent, title = "Qualified Sell-Side Sweep", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.small)
+plotshape(showSweepTriangles and bearEvent, title = "Qualified Buy-Side Sweep", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.small)
+
+// ============================================================================
+// RIGHT-EDGE LIQUIDITY LABELS
+// ============================================================================
+
+var label labelPDH = na
+var label labelPDL = na
+var label labelAsiaHigh = na
+var label labelAsiaLow = na
+var label labelLondonHigh = na
+var label labelLondonLow = na
+var label label5mHigh = na
+var label label5mLow = na
+var label label15mHigh = na
+var label label15mLow = na
+var label labelEQH = na
+var label labelEQL = na
+
+if barstate.islast
+    if not na(labelPDH)
+        label.delete(labelPDH)
+        labelPDH := na
+    if not na(labelPDL)
+        label.delete(labelPDL)
+        labelPDL := na
+    if not na(labelAsiaHigh)
+        label.delete(labelAsiaHigh)
+        labelAsiaHigh := na
+    if not na(labelAsiaLow)
+        label.delete(labelAsiaLow)
+        labelAsiaLow := na
+    if not na(labelLondonHigh)
+        label.delete(labelLondonHigh)
+        labelLondonHigh := na
+    if not na(labelLondonLow)
+        label.delete(labelLondonLow)
+        labelLondonLow := na
+    if not na(label5mHigh)
+        label.delete(label5mHigh)
+        label5mHigh := na
+    if not na(label5mLow)
+        label.delete(label5mLow)
+        label5mLow := na
+    if not na(label15mHigh)
+        label.delete(label15mHigh)
+        label15mHigh := na
+    if not na(label15mLow)
+        label.delete(label15mLow)
+        label15mLow := na
+    if not na(labelEQH)
+        label.delete(labelEQH)
+        labelEQH := na
+    if not na(labelEQL)
+        label.delete(labelEQL)
+        labelEQL := na
+
+if barstate.islast and showLiquidityLabels
+    labelX = bar_index + liquidityLabelOffset
+
+    if not na(plotPDH)
+        labelPDH := label.new(labelX, plotPDH, liquidityText("PDH", plotPDH), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.red, 15), textcolor = color.white, size = size.tiny)
+    if not na(plotPDL)
+        labelPDL := label.new(labelX, plotPDL, liquidityText("PDL", plotPDL), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.green, 15), textcolor = color.white, size = size.tiny)
+    if not na(plotAsiaHigh)
+        labelAsiaHigh := label.new(labelX, plotAsiaHigh, liquidityText("ASIA H", plotAsiaHigh), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.aqua, 15), textcolor = color.black, size = size.tiny)
+    if not na(plotAsiaLow)
+        labelAsiaLow := label.new(labelX, plotAsiaLow, liquidityText("ASIA L", plotAsiaLow), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.aqua, 15), textcolor = color.black, size = size.tiny)
+    if not na(plotLondonHigh)
+        labelLondonHigh := label.new(labelX, plotLondonHigh, liquidityText("LDN H", plotLondonHigh), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.orange, 10), textcolor = color.black, size = size.tiny)
+    if not na(plotLondonLow)
+        labelLondonLow := label.new(labelX, plotLondonLow, liquidityText("LDN L", plotLondonLow), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.orange, 10), textcolor = color.black, size = size.tiny)
+    if not na(plot5mHigh)
+        label5mHigh := label.new(labelX, plot5mHigh, liquidityText("5M H", plot5mHigh), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.blue, 10), textcolor = color.white, size = size.tiny)
+    if not na(plot5mLow)
+        label5mLow := label.new(labelX, plot5mLow, liquidityText("5M L", plot5mLow), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.blue, 10), textcolor = color.white, size = size.tiny)
+    if not na(plot15mHigh)
+        label15mHigh := label.new(labelX, plot15mHigh, liquidityText("15M H", plot15mHigh), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.purple, 5), textcolor = color.white, size = size.tiny)
+    if not na(plot15mLow)
+        label15mLow := label.new(labelX, plot15mLow, liquidityText("15M L", plot15mLow), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.purple, 5), textcolor = color.white, size = size.tiny)
+    if not na(plotEqualHigh)
+        labelEQH := label.new(labelX, plotEqualHigh, liquidityText("EQH", plotEqualHigh), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.fuchsia, 10), textcolor = color.white, size = size.tiny)
+    if not na(plotEqualLow)
+        labelEQL := label.new(labelX, plotEqualLow, liquidityText("EQL", plotEqualLow), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.fuchsia, 10), textcolor = color.white, size = size.tiny)
+
+// ============================================================================
+// COMPACT LEGEND
+// ============================================================================
+
+var table liquidityLegend = table.new(position.top_right, 2, 8, border_width = 1)
+
+if barstate.islast
+    if showLegend
+        table.cell(liquidityLegend, 0, 0, "LIQUIDITY", bgcolor = color.new(color.black, 15), text_color = color.white)
+        table.cell(liquidityLegend, 1, 0, "SOURCE", bgcolor = color.new(color.black, 15), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 1, "PDH", bgcolor = color.red, text_color = color.white)
+        table.cell(liquidityLegend, 1, 1, "Previous day high", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 2, "PDL", bgcolor = color.green, text_color = color.white)
+        table.cell(liquidityLegend, 1, 2, "Previous day low", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 3, "ASIA", bgcolor = color.aqua, text_color = color.black)
+        table.cell(liquidityLegend, 1, 3, "Asia H / L", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 4, "LDN", bgcolor = color.orange, text_color = color.black)
+        table.cell(liquidityLegend, 1, 4, "London H / L", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 5, "5M", bgcolor = color.blue, text_color = color.white)
+        table.cell(liquidityLegend, 1, 5, "5M swing", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 6, "15M", bgcolor = color.purple, text_color = color.white)
+        table.cell(liquidityLegend, 1, 6, "15M swing", bgcolor = color.new(color.black, 25), text_color = color.white)
+
+        table.cell(liquidityLegend, 0, 7, "EQ", bgcolor = color.fuchsia, text_color = color.white)
+        table.cell(liquidityLegend, 1, 7, "Equal H / L", bgcolor = color.new(color.black, 25), text_color = color.white)
+    else
+        table.clear(liquidityLegend, 0, 0, 1, 7)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(longSignal, "Liquidity Engine v3.2 LONG", "Gold Execution Engine: qualified liquidity sweep + displacement + BOS + session/regime confirmation.")
+alertcondition(shortSignal, "Liquidity Engine v3.2 SHORT", "Gold Execution Engine: qualified liquidity sweep + displacement + BOS + session/regime confirmation.")
