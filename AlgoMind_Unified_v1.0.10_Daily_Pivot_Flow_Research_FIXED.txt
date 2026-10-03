@@ -1,0 +1,1642 @@
+    //@version=6
+
+    // AlgoMind Unified v1.0.10 - Daily Pivot Flow Research.
+
+    // Integration research build: not a byte-identical port of EXEC v1.4.2.
+
+    // EXEC-derived sole READY authority. Fusion-derived context has NO READY authority.
+
+    indicator("AlgoMind Unified v1.0.10 | Pivot Flow Research | 15M FVG / M5 EXEC", "AlgoMind Unified 1.0.10", overlay=true, max_lines_count=110, max_labels_count=120, max_boxes_count=16)
+
+
+
+    string GL="1. Qualified liquidity"
+
+    string GE="2. EXEC confirmation"
+
+    string GR="3. Risk"
+
+    string GC="4. Context only"
+
+    string GD="5. Display"
+
+    use4=input.bool(true,"4H",group=GL)
+
+    use1=input.bool(true,"1H",group=GL)
+
+    useSession=input.bool(true,"Completed sessions",group=GL)
+
+    usePD=input.bool(true,"Previous day",group=GL)
+
+    minSweep=input.float(0.05,"Sweep penetration ATR",minval=0,step=.01,group=GL)
+
+    minReclaim=input.float(0.05,"Close-back ATR",minval=0,step=.01,group=GL)
+
+    maxSweepBars=input.int(60,"Sweep to confirmation: M5 bars",minval=6,group=GE)
+
+    swing=input.int(3,"M5 MSS swing",minval=1,group=GE)
+
+    mssAtr=input.float(.08,"MSS clearance ATR",minval=0,step=.01,group=GE)
+
+    dispAtr=input.float(.65,"Displacement body ATR",minval=.1,step=.05,group=GE)
+
+    maxDispBars=input.int(6,"MSS to displacement bars",minval=1,group=GE)
+
+    minGapAtr=input.float(.08,"15M FVG minimum width / 15M ATR",minval=0,step=.01,group=GE)
+
+    maxGapBars=input.int(12,"Displacement to 15M FVG: M5 bars",minval=1,group=GE)
+
+    allowInverse=input.bool(true,"Enable 15M IFVG alternative",group=GE)
+
+    minRR=input.float(2.0,"Minimum realistic RR",minval=1,step=.25,group=GR)
+
+    stopPad=input.float(.10,"Structural stop buffer ATR",minval=0,step=.05,group=GR)
+
+    maxChase=input.float(.35,"Maximum close distance from CE ATR",minval=0,step=.05,group=GR)
+
+    expiry=input.int(100,"Setup expiry: M5 bars",minval=10,group=GR)
+
+    showEMA=input.bool(true,"20 / 50 EMA",group=GC)
+
+    showLiq=input.bool(true,"Nearest BSL / SSL",group=GD)
+
+    showZone=input.bool(true,"Active execution zone",group=GD)
+
+    showCELabel=input.bool(true,"15M FVG / IFVG CE price label",group=GD)
+
+    show4HClock=input.bool(true,"4H close countdown / candle state",group=GD)
+
+    showDash=input.bool(true,"Show dashboard",group=GD)
+
+    dashMode=input.string("Compact","Dashboard view",options=["Compact","Detailed"],group=GD)
+
+    showContextFVG=input.bool(true,"Independent confirmed 15M FVG / IFVG map",group=GD)
+
+    showContextCE=input.bool(true,"Context 15M CE price markers",group=GD)
+
+    contextExtend=input.int(28,"Context FVG extension (M5 bars)",minval=3,maxval=100,group=GD)
+
+    showTargetGuides=input.bool(true,"Show provisional / READY target guides",group=GD)
+
+    navLength=input.int(30,"NAV segment length (bars)",minval=5,maxval=200,group=GD)
+
+    // Daily reference overlay: does not feed the liquidity registry or EXEC.
+
+    string GDR="6. Daily reference lines (visual only)"
+
+    showPDH=input.bool(true,"Show PDH",group=GDR)
+
+    showPDL=input.bool(true,"Show PDL",group=GDR)
+
+    showTDO=input.bool(true,"Show TDO",group=GDR)
+
+    tdoMode=input.string("New York midnight","TDO reference",options=["New York midnight","TradingView daily open"],group=GDR)
+
+    refLineWidth=input.int(2,"Dashed line thickness",minval=1,maxval=4,group=GDR)
+
+    refLabelOffset=input.int(20,"Daily label offset (bars)",minval=12,maxval=60,group=GDR)
+
+    // ============================================================================
+    // ALGOMIND-NATIVE DAILY PIVOT FLOW RESEARCH - CONTEXT ONLY
+    // NEVER writes EXEC state, READY, liquidity ownership, target selection,
+    // FVG/IFVG qualification, CE, stop or RR.
+    // ============================================================================
+    string GPF="8. Daily Pivot Flow Research (display only)"
+    showPivotFlow=input.bool(true,"Show AlgoMind daily pivot ladder",group=GPF)
+    showPivotLabels=input.bool(true,"Show pivot labels",group=GPF)
+    pivotZoneATR=input.float(0.08,"Pivot zone half-width ATR",minval=0.01,step=0.01,group=GPF)
+    pivotApproachATR=input.float(0.25,"Approach distance ATR",minval=0.05,step=0.05,group=GPF)
+    pivotAcceptBars=input.int(2,"Acceptance closes beyond zone",minval=1,maxval=6,group=GPF)
+    pivotLineWidth=input.int(1,"Pivot line thickness",minval=1,maxval=3,group=GPF)
+
+
+
+
+
+
+    // The integration runs ONLY on M5, so MSS and confirmed CE rejection cannot silently
+
+    // become different signals when users change the chart timeframe.
+
+    bool onM5=timeframe.isminutes and timeframe.multiplier==5
+
+    float atr=ta.atr(14)
+
+    float e20=ta.ema(close,20)
+
+    float e50=ta.ema(close,50)
+
+    plot(showEMA?e20:na,"EMA20",color=color.new(color.teal,35))
+
+    plot(showEMA?e50:na,"EMA50",color=color.new(color.orange,40))
+
+    // Completed HTF values: previous HTF bar sampled with lookahead_on is confirmed.
+
+    [h4h,h4l,h4t]=request.security(syminfo.tickerid,"240",[high[1],low[1],time[1]],lookahead=barmerge.lookahead_on)
+
+    [h1h,h1l,h1t]=request.security(syminfo.tickerid,"60",[high[1],low[1],time[1]],lookahead=barmerge.lookahead_on)
+
+    [pdh,pdl,pdt]=request.security(syminfo.tickerid,"D",[high[1],low[1],time[1]],lookahead=barmerge.lookahead_on)
+
+    [hc,he20,he50]=request.security(syminfo.tickerid,"240",[close[1],ta.ema(close,20)[1],ta.ema(close,50)[1]],lookahead=barmerge.lookahead_on)
+
+    [cc,ce20,ce50]=request.security(syminfo.tickerid,"60",[close[1],ta.ema(close,20)[1],ta.ema(close,50)[1]],lookahead=barmerge.lookahead_on)
+
+    int bias4=hc>he20 and he20>he50?1:hc<he20 and he20<he50?-1:0
+
+    int bias1=cc>ce20 and ce20>ce50?1:cc<ce20 and ce20<ce50?-1:0
+
+    // Fusion SuperTrend is shown as separate context; it never gates READY.
+
+    f_st()=>
+
+        [v,d]=ta.supertrend(1.0,10)
+
+        d[1]
+
+    float st4=request.security(syminfo.tickerid,"240",f_st(),lookahead=barmerge.lookahead_on)
+
+    float st1=request.security(syminfo.tickerid,"60",f_st(),lookahead=barmerge.lookahead_on)
+
+    string fusionBias=st4<0 and st1<0?"BULL":st4>0 and st1>0?"BEAR":"MIXED"
+
+
+
+    // One canonical liquidity registry. Coincident levels merge into one owner,
+
+    // while secondary source names are appended to the dominant ribbon.
+
+    var array<float> levels=array.new_float()
+
+    var array<int> sides=array.new_int()
+
+    var array<int> ranks=array.new_int()
+
+    var array<string> sources=array.new_string()
+
+    var array<bool> live=array.new_bool()
+
+    add(float p,int side,int rank,string source)=>
+
+        if not na(p)
+
+            int found=-1
+
+            if array.size(levels)>0
+
+                for i=0 to array.size(levels)-1
+
+                    if array.get(live,i) and array.get(sides,i)==side and math.abs(array.get(levels,i)-p)<=math.max(syminfo.mintick*3,atr*.012)
+
+                        found:=i
+
+                        break
+
+            if found>=0
+
+                string old=array.get(sources,found)
+
+                if not str.contains(old,source)
+
+                    array.set(sources,found,rank<array.get(ranks,found)?source+" + "+old:old+" + "+source)
+
+                if rank<array.get(ranks,found)
+
+                    array.set(ranks,found,rank)
+
+                    array.set(levels,found,p)
+
+            else
+
+                array.push(levels,p),array.push(sides,side),array.push(ranks,rank),array.push(sources,source),array.push(live,true)
+
+    if onM5 and use4 and ta.change(h4t)!=0
+
+        add(h4h,1,1,"4H"),add(h4l,-1,1,"4H")
+
+    if onM5 and use1 and ta.change(h1t)!=0
+
+        add(h1h,1,2,"1H"),add(h1l,-1,2,"1H")
+
+    if onM5 and usePD and ta.change(pdt)!=0
+
+        add(pdh,1,4,"PDH"),add(pdl,-1,4,"PDL")
+
+    // Session times are New York local. Only completed session extremes are registered.
+
+    string tz="America/New_York"
+
+    bool a=not na(time(timeframe.period,"2000-0000",tz))
+
+    bool l=not na(time(timeframe.period,"0200-0500",tz))
+
+    bool n=not na(time(timeframe.period,"0830-1100",tz))
+
+    var float ah=na
+
+    var float al=na
+
+    var float lh=na
+
+    var float ll=na
+
+    var float nh=na
+
+    var float nl=na
+
+    if a and not a[1]
+
+        ah:=high,al:=low
+
+    else if a
+
+        ah:=math.max(ah,high),al:=math.min(al,low)
+
+    if l and not l[1]
+
+        lh:=high,ll:=low
+
+    else if l
+
+        lh:=math.max(lh,high),ll:=math.min(ll,low)
+
+    if n and not n[1]
+
+        nh:=high,nl:=low
+
+    else if n
+
+        nh:=math.max(nh,high),nl:=math.min(nl,low)
+
+    if onM5 and useSession and not a and a[1]
+
+        add(ah,1,3,"Asia"),add(al,-1,3,"Asia")
+
+    if onM5 and useSession and not l and l[1]
+
+        add(lh,1,3,"London"),add(ll,-1,3,"London")
+
+    if onM5 and useSession and not n and n[1]
+
+        add(nh,1,3,"NY"),add(nl,-1,3,"NY")
+
+    // Retire invalid-side levels after checking for sweeps on the confirmed bar.
+
+    var bool active=false
+
+    var bool consumed=false
+
+    var int dir=0
+
+    var int sweepBar=na
+
+    var int mssBar=na
+
+    var int dispBar=na
+
+    var int gapBar=na
+
+    var float sweepPrice=na
+
+    var float sweepExtreme=na
+
+    var float zoneTop=na
+
+    var float zoneBottom=na
+
+    var float opTop=na
+
+    var float opBottom=na
+
+    var int opTime=na
+
+    var string owner=""
+
+    var string branch=""
+
+    var string status="WAIT"
+
+    var bool mss=false
+
+    var bool disp=false
+
+    var bool gap=false
+
+    var bool ceTouched=false
+
+    var float entry=na
+
+    var float stop=na
+
+    var float target=na
+
+    var float rr=na
+
+    var box zoneBox=na
+
+    var line sweepLine=na
+
+    var label sweepLabel=na
+
+    // VISUAL ONLY: independent horizontal NAV segments, never used for trade selection.
+
+    var line navBSL=na
+
+    var line navSSL=na
+
+    var line ceGuide=na
+
+    var label ceGuideLabel=na
+
+    var float navBSLPrice=na
+
+    var float navSSLPrice=na
+
+    var line guideEntry=na
+
+    var line guideStop=na
+
+    var line guideTarget=na
+
+    var label guideLabel=na
+
+    float upper=na
+
+    float lower=na
+
+    int winner=-1
+
+    int winningRank=99
+
+    int winningSide=0
+
+    if array.size(levels)>0
+
+        for i=0 to array.size(levels)-1
+
+            if array.get(live,i)
+
+                float p=array.get(levels,i)
+
+                int s=array.get(sides,i)
+
+                if s==1 and p>close and (na(upper) or p<upper)
+
+                    upper:=p
+
+                if s==-1 and p<close and (na(lower) or p>lower)
+
+                    lower:=p
+
+                bool swept=onM5 and barstate.isconfirmed and (s==1?high>p+atr*minSweep and close<p-atr*minReclaim:low<p-atr*minSweep and close>p+atr*minReclaim)
+
+                if swept and not active and array.get(ranks,i)<winningRank
+
+                    winner:=i,winningRank:=array.get(ranks,i),winningSide:=s
+
+                // No invalid-side levels remain as future target candidates.
+
+                if onM5 and barstate.isconfirmed and ((s==1 and close>=p) or (s==-1 and close<=p) or swept)
+
+                    array.set(live,i,false)
+
+    // Once a setup is locked, subsequent sweeps cannot replace it.
+
+    if onM5 and barstate.isconfirmed and winner>=0 and not active
+
+        active:=true,consumed:=false,dir:=-winningSide
+
+        sweepBar:=bar_index,sweepPrice:=array.get(levels,winner)
+
+        sweepExtreme:=dir==1?low:high
+
+        owner:=array.get(sources,winner)
+
+        mss:=false,disp:=false,gap:=false,ceTouched:=false
+
+        mssBar:=na,dispBar:=na,gapBar:=na
+
+        zoneTop:=na,zoneBottom:=na,opTop:=na,opBottom:=na,opTime:=na
+
+        entry:=na,stop:=na,target:=na,rr:=na,branch:=""
+
+        status:="SWEEP LOCKED"
+
+        if not na(zoneBox)
+
+            box.delete(zoneBox),zoneBox:=na
+
+        if not na(sweepLine)
+
+            line.delete(sweepLine)
+
+        if not na(sweepLabel)
+
+            label.delete(sweepLabel)
+
+        sweepLine:=line.new(bar_index,sweepPrice,bar_index+20,sweepPrice,color=dir==1?color.teal:color.red,style=line.style_dashed)
+
+        sweepLabel:=label.new(bar_index,sweepPrice,owner+(dir==1?" SSL SWEPT ✓":" BSL SWEPT ✓"),style=label.style_label_left,color=dir==1?color.teal:color.red,textcolor=color.white,size=size.small)
+
+    if not na(sweepLine)
+
+        line.set_x2(sweepLine,bar_index+4)
+
+    if not na(sweepLabel)
+
+        label.set_x(sweepLabel,bar_index+4)
+
+
+
+    float ph=ta.pivothigh(high,swing,swing)
+
+    float pl=ta.pivotlow(low,swing,swing)
+
+    var float lastHigh=na
+
+    var float lastLow=na
+
+    if not na(ph)
+
+        lastHigh:=ph
+
+    if not na(pl)
+
+        lastLow:=pl
+
+    bool bullMss=not na(lastHigh) and close>lastHigh+atr*mssAtr and close[1]<=lastHigh
+
+    bool bearMss=not na(lastLow) and close<lastLow-atr*mssAtr and close[1]>=lastLow
+
+    bool confirmed=onM5 and barstate.isconfirmed
+
+    if active and confirmed and not consumed
+
+        sweepExtreme:=dir==1?math.min(sweepExtreme,low):math.max(sweepExtreme,high)
+
+        if bar_index-sweepBar>expiry or (dir==1?close<sweepPrice-atr:close>sweepPrice+atr)
+
+            status:="EXPIRED / INVALID",active:=false
+
+        else
+
+            if not mss and bar_index-sweepBar<=maxSweepBars and (dir==1?bullMss:bearMss)
+
+                mss:=true,mssBar:=bar_index,status:="MSS CONFIRMED"
+
+            if mss and not disp and bar_index>=mssBar and bar_index-mssBar<=maxDispBars and (dir==1?close>open:close<open) and math.abs(close-open)>=atr*dispAtr
+
+                disp:=true,dispBar:=bar_index,status:="DISPLACEMENT"
+
+            if mss and not disp and bar_index-mssBar>maxDispBars
+
+                status:="DISPLACEMENT TIMEOUT",active:=false
+
+
+
+    // 15M closed-bar events, emitted once on the first M5 bar of a NEW 15M candle.
+
+    // We use the PREVIOUS 15M candle's confirmed FVG and the 15M candle before it.
+
+    [gapBull,gapBear,gTopBull,gBotBull,gTopBear,gBotBear,gAtr,tf15time,close15,prevClose15]=request.security(syminfo.tickerid,"15",[low[1]>high[3],high[1]<low[3],low[1],high[3],low[3],high[1],ta.atr(14)[1],time[1],close[1],close[2]],lookahead=barmerge.lookahead_on)
+
+    bool new15=ta.change(tf15time)!=0
+
+    // ============================================================================
+
+    // LAYER 1: independent, confirmed 15M context. No variables below are read by
+
+    // the EXEC READY condition, sweep owner, target selection or risk calculations.
+
+    // Each direction retains its latest confirmed gap. A closed 15M inversion of
+
+    // that gap is separately marked IFVG; this does NOT qualify an EXEC IFVG.
+
+    // ============================================================================
+
+    var float ctxBullTop = na
+
+    var float ctxBullBottom = na
+
+    var float ctxBearTop = na
+
+    var float ctxBearBottom = na
+
+    var int ctxBullBorn = na
+
+    var int ctxBearBorn = na
+
+    var int ctxBullState = 0  // 0 none, 1 fresh, 2 touched, 3 partial, 4 CE, 5 invalid
+
+    var int ctxBearState = 0
+
+    var bool ctxBullInverse = false
+
+    var bool ctxBearInverse = false
+
+    var box ctxBullBox = na
+
+    var box ctxBearBox = na
+
+    var line ctxBullCE = na
+
+    var line ctxBearCE = na
+
+    var label ctxBullLabel = na
+
+    var label ctxBearLabel = na
+
+
+
+    // Update older zones before registering the new confirmed 15M event.
+
+    // A bullish FVG is fully invalidated below its lower boundary; a bearish
+
+    // FVG is fully invalidated above its upper boundary. IFVGs use the inverse.
+
+    if onM5 and barstate.isconfirmed
+
+        if ctxBullState > 0 and ctxBullState < 5 and not na(ctxBullBorn) and bar_index > ctxBullBorn
+
+            float bullMid = (ctxBullTop + ctxBullBottom) / 2.0
+
+            if ctxBullInverse
+
+                ctxBullState := close > ctxBullTop ? 5 : low <= ctxBullBottom ? 4 : low <= bullMid ? 3 : low < ctxBullTop ? 2 : ctxBullState
+
+            else
+
+                ctxBullState := close < ctxBullBottom ? 5 : low <= ctxBullBottom ? 4 : low <= bullMid ? 4 : low < ctxBullTop ? 3 : ctxBullState
+
+        if ctxBearState > 0 and ctxBearState < 5 and not na(ctxBearBorn) and bar_index > ctxBearBorn
+
+            float bearMid = (ctxBearTop + ctxBearBottom) / 2.0
+
+            if ctxBearInverse
+
+                ctxBearState := close < ctxBearBottom ? 5 : high >= ctxBearTop ? 4 : high >= bearMid ? 3 : high > ctxBearBottom ? 2 : ctxBearState
+
+            else
+
+                ctxBearState := close > ctxBearTop ? 5 : high >= ctxBearTop ? 4 : high >= bearMid ? 4 : high > ctxBearBottom ? 3 : ctxBearState
+
+
+
+    if onM5 and barstate.isconfirmed and new15
+
+        // Only the PREVIOUS, completed 15M candle is evaluated. The previous
+
+        // candle is never allowed to invert a gap born on that same candle.
+
+        if ctxBullState > 0 and not ctxBullInverse and not na(ctxBullBorn) and bar_index > ctxBullBorn and close15 < ctxBullBottom and prevClose15 >= ctxBullBottom
+
+            ctxBullInverse := true
+
+            ctxBullState := 1
+
+            ctxBullBorn := bar_index
+
+        if ctxBearState > 0 and not ctxBearInverse and not na(ctxBearBorn) and bar_index > ctxBearBorn and close15 > ctxBearTop and prevClose15 <= ctxBearTop
+
+            ctxBearInverse := true
+
+            ctxBearState := 1
+
+            ctxBearBorn := bar_index
+
+        // New gaps supersede only the corresponding direction's context slot.
+
+        if gapBull and gTopBull > gBotBull and gTopBull - gBotBull >= gAtr * minGapAtr
+
+            ctxBullTop := gTopBull
+
+            ctxBullBottom := gBotBull
+
+            ctxBullBorn := bar_index
+
+            ctxBullState := 1
+
+            ctxBullInverse := false
+
+        if gapBear and gTopBear > gBotBear and gTopBear - gBotBear >= gAtr * minGapAtr
+
+            ctxBearTop := gTopBear
+
+            ctxBearBottom := gBotBear
+
+            ctxBearBorn := bar_index
+
+            ctxBearState := 1
+
+            ctxBearInverse := false
+
+
+
+    ctxStateName(int state) =>
+
+        state == 1 ? "FRESH" : state == 2 ? "TOUCHED" : state == 3 ? "PARTIAL" : state == 4 ? "CE / FILLED" : state == 5 ? "INVALID" : "NONE"
+
+
+
+    // Drawing objects are exclusively presentation. Never draw a context gap as
+
+    // an EXEC entry, stop, target or READY projection.
+
+    if barstate.islast
+
+        if not na(ctxBullBox)
+
+            box.delete(ctxBullBox)
+
+            ctxBullBox := na
+
+        if not na(ctxBearBox)
+
+            box.delete(ctxBearBox)
+
+            ctxBearBox := na
+
+        if not na(ctxBullCE)
+
+            line.delete(ctxBullCE)
+
+            ctxBullCE := na
+
+        if not na(ctxBearCE)
+
+            line.delete(ctxBearCE)
+
+            ctxBearCE := na
+
+        if not na(ctxBullLabel)
+
+            label.delete(ctxBullLabel)
+
+            ctxBullLabel := na
+
+        if not na(ctxBearLabel)
+
+            label.delete(ctxBearLabel)
+
+            ctxBearLabel := na
+
+        if showContextFVG and onM5
+
+            if ctxBullState > 0 and ctxBullState < 5 and not na(ctxBullTop)
+
+                int bx = math.max(0, bar_index - contextExtend)
+
+                float mid = (ctxBullTop + ctxBullBottom) / 2.0
+
+                color bc = ctxBullInverse ? color.orange : color.teal
+
+                ctxBullBox := box.new(bx, ctxBullTop, bar_index + 3, ctxBullBottom, bgcolor=color.new(bc, 91), border_color=color.new(bc, 55))
+
+                if showContextCE
+
+                    ctxBullCE := line.new(bx, mid, bar_index + 4, mid, color=color.new(bc, 25), style=line.style_dotted)
+
+                    ctxBullLabel := label.new(bar_index + 4, mid, (ctxBullInverse ? "15M BEAR IFVG" : "15M BULL FVG") + " CE " + str.tostring(mid, format.mintick), style=label.style_label_left, color=color.new(bc, 40), textcolor=color.white, size=size.tiny)
+
+            if ctxBearState > 0 and ctxBearState < 5 and not na(ctxBearTop)
+
+                int bx = math.max(0, bar_index - contextExtend)
+
+                float mid = (ctxBearTop + ctxBearBottom) / 2.0
+
+                color bc = ctxBearInverse ? color.teal : color.red
+
+                ctxBearBox := box.new(bx, ctxBearTop, bar_index + 3, ctxBearBottom, bgcolor=color.new(bc, 91), border_color=color.new(bc, 55))
+
+                if showContextCE
+
+                    ctxBearCE := line.new(bx, mid, bar_index + 4, mid, color=color.new(bc, 25), style=line.style_dotted)
+
+                    ctxBearLabel := label.new(bar_index + 4, mid, (ctxBearInverse ? "15M BULL IFVG" : "15M BEAR FVG") + " CE " + str.tostring(mid, format.mintick), style=label.style_label_left, color=color.new(bc, 40), textcolor=color.white, size=size.tiny)
+
+
+
+    if active and disp and confirmed and new15 and bar_index>dispBar and bar_index-dispBar<=maxGapBars
+
+        bool sameGap=(dir==1?gapBull and gTopBull-gBotBull>=gAtr*minGapAtr:gapBear and gTopBear-gBotBear>=gAtr*minGapAtr)
+
+        bool oppositeGap=(dir==1?gapBear and gTopBear-gBotBear>=gAtr*minGapAtr:gapBull and gTopBull-gBotBull>=gAtr*minGapAtr)
+
+        if sameGap and not gap
+
+            gap:=true,gapBar:=bar_index,branch:="15M FVG"
+
+            zoneTop:=dir==1?gTopBull:gTopBear
+
+            zoneBottom:=dir==1?gBotBull:gBotBear
+
+            status:="WAIT CE RETEST"
+
+        if allowInverse and oppositeGap and not gap
+
+            opTop:=dir==1?gTopBear:gTopBull
+
+            opBottom:=dir==1?gBotBear:gBotBull
+
+            opTime:=tf15time
+
+    // Inversion requires a distinct subsequent CLOSED 15M candle to reclaim the
+
+    // opposite gap, not a still-forming 15M candle.
+
+    if active and disp and not gap and allowInverse and confirmed and new15 and not na(opTime) and tf15time>opTime
+
+        bool inverted=dir==1?close15>opTop and prevClose15<=opTop:close15<opBottom and prevClose15>=opBottom
+
+        if inverted
+
+            gap:=true,gapBar:=bar_index,branch:="15M IFVG"
+
+            zoneTop:=opTop,zoneBottom:=opBottom
+
+            status:="WAIT IFVG RETEST"
+
+    if active and disp and not gap and bar_index-dispBar>maxGapBars
+
+        status:="15M GAP TIMEOUT",active:=false
+
+    if gap and active and showZone and na(zoneBox)
+
+        zoneBox:=box.new(bar_index,zoneTop,bar_index+1,zoneBottom,bgcolor=color.new(dir==1?color.teal:color.red,87),border_color=dir==1?color.teal:color.red)
+
+    if not na(zoneBox) and active
+
+        box.set_right(zoneBox,bar_index+2)
+
+    // Target selection uses only live, opposing liquidity on the correct side of
+
+    // the CE entry. NAV levels do not grant execution permission.
+
+    float ce=gap?(zoneTop+zoneBottom)/2:na
+
+    float structuralStop=active?(dir==1?sweepExtreme-atr*stopPad:sweepExtreme+atr*stopPad):na
+
+    float risk=gap?math.abs(close-structuralStop):na
+
+    float bestTarget=na
+
+    if gap and active and risk>syminfo.mintick and (dir==1?structuralStop<ce:structuralStop>ce)
+
+        if array.size(levels)>0
+
+            for i=0 to array.size(levels)-1
+
+                if array.get(live,i) and array.get(sides,i)==dir
+
+                    float p=array.get(levels,i)
+
+                    bool valid=dir==1?p>close:p<close
+
+                    if valid and (na(bestTarget) or (dir==1?p<bestTarget:p>bestTarget))
+
+                        bestTarget:=p
+
+    float projectedRR=not na(bestTarget) and risk>0?math.abs(bestTarget-close)/risk:na
+
+    bool geometry=gap and not na(bestTarget) and (dir==1?structuralStop<close and bestTarget>close:structuralStop>close and bestTarget<close) and projectedRR>=minRR
+
+    bool touch=gap and active and confirmed and bar_index>gapBar and low<=ce and high>=ce
+
+    if touch
+
+        ceTouched:=true
+
+    bool reject=touch and (dir==1?close>ce and close>open:close<ce and close<open)
+
+    bool noChase=gap and math.abs(close-ce)<=atr*maxChase
+
+    bool ready=confirmed and active and not consumed and mss and disp and gap and geometry and reject and noChase
+
+    if active and gap and confirmed and (dir==1?close<zoneBottom:close>zoneTop) and not ready
+
+        status:="ZONE INVALID",active:=false
+
+    if ready
+
+        entry:=close,stop:=structuralStop,target:=bestTarget,rr:=projectedRR
+
+        status:=dir==1?"BUY READY":"SELL READY"
+
+        consumed:=true,active:=false
+
+        label.new(bar_index,dir==1?low:high,(dir==1?"BUY":"SELL")+" READY\n"+str.tostring(rr,"#.##")+"R",style=dir==1?label.style_label_up:label.style_label_down,color=dir==1?color.teal:color.red,textcolor=color.white)
+
+    if active and gap and not ready
+
+        status:=not geometry?"WAIT VALID >=2R TARGET":ceTouched?"WAIT M5 REJECTION":"WAIT CE RETEST"
+
+
+
+    // ============================================================================
+
+    // SWEEP REACTION LIFECYCLE (SRI) - RESEARCH ONLY
+
+    // This module reads an EXEC-locked sweep but NEVER writes EXEC state.
+
+    // Peak and follow-through are historical; current state is independent.
+
+    // ============================================================================
+
+    string GSRI="7. Sweep reaction research (display only)"
+
+    bool showSRI=input.bool(true,"Show sweep reaction dashboard",group=GSRI)
+
+    int sriMemory=input.int(72,"Reaction observation window (M5 bars)",minval=6,maxval=288,group=GSRI)
+
+    float sriStrongATR=input.float(1.5,"Strong reaction distance (event ATR)",minval=0.25,step=0.25,group=GSRI)
+
+    float sriFollowATR=input.float(0.5,"Follow-through threshold (event ATR)",minval=0.1,step=0.1,group=GSRI)
+
+    float sriInvalidATR=input.float(0.25,"Invalidation beyond sweep extreme (event ATR)",minval=0.0,step=0.05,group=GSRI)
+
+    float sriFlatATR=input.float(0.12,"Consolidation change (event ATR)",minval=0.01,step=0.01,group=GSRI)
+
+    var int sriBar=na
+
+    var int sriDir=0
+
+    var string sriOwner=""
+
+    var float sriLevel=na
+
+    var float sriExtreme=na
+
+    var float sriATR=na
+
+    var float sriBest=na
+
+    var float sriLastClose=na
+
+    var float sriWickPct=na
+
+    var float sriCloseBack=na
+
+    var bool sriInvalid=false
+
+    var bool sriFollow=false
+
+    var string sriLiveState="NO SWEEP"
+
+    var int sriPeakBar=na
+
+    // Event identity comes exclusively from the existing EXEC sweep lock.
+
+    // A later qualified EXEC event starts a new observation; an EXEC timeout
+
+    // cannot reset or reclassify the prior research event.
+
+    bool sriNewEvent=confirmed and winner>=0 and sweepBar==bar_index and active and not na(sweepPrice)
+
+    if sriNewEvent
+
+        sriBar:=bar_index
+
+        sriDir:=dir
+
+        sriOwner:=owner
+
+        sriLevel:=sweepPrice
+
+        sriExtreme:=dir==1?low:high
+
+        sriATR:=atr
+
+        sriBest:=dir==1?high:low
+
+        sriLastClose:=close
+
+        float sriRange=math.max(high-low,syminfo.mintick)
+
+        sriWickPct:=dir==1?(math.min(open,close)-low)/sriRange:(high-math.max(open,close))/sriRange
+
+        sriCloseBack:=dir==1?(close-sriLevel)/math.max(sriATR,syminfo.mintick):(sriLevel-close)/math.max(sriATR,syminfo.mintick)
+
+        sriInvalid:=false
+
+        sriFollow:=false
+
+        sriLiveState:="DEVELOPING"
+
+        sriPeakBar:=bar_index
+
+    bool sriInWindow=not na(sriBar) and bar_index-sriBar<=sriMemory
+
+    // Process confirmed candles only. Record any new favorable extreme BEFORE
+
+    // evaluating invalidation on that same candle, so historical peak survives.
+
+    if confirmed and sriInWindow and not sriNewEvent and not sriInvalid
+
+        float sriCandidate=sriDir==1?high:low
+
+        bool sriNewPeak=sriDir==1?sriCandidate>sriBest:sriCandidate<sriBest
+
+        if sriNewPeak
+
+            sriBest:=sriCandidate
+
+            sriPeakBar:=bar_index
+
+        float sriFavorable=sriDir==1?(close-sriLevel):(sriLevel-close)
+
+        sriFollow:=sriFollow or sriFavorable>=sriFollowATR*sriATR
+
+        bool sriNowInvalid=sriDir==1?close<sriExtreme-sriInvalidATR*sriATR:close>sriExtreme+sriInvalidATR*sriATR
+
+        float sriDelta=(sriDir==1?close-sriLastClose:sriLastClose-close)/math.max(sriATR,syminfo.mintick)
+
+        if sriNowInvalid
+
+            sriInvalid:=true
+
+            sriLiveState:="INVALIDATED"
+
+        else if math.abs(sriDelta)<=sriFlatATR
+
+            sriLiveState:="CONSOLIDATING"
+
+        else if sriDelta<0
+
+            sriLiveState:="RETRACING"
+
+        else if sriNewPeak
+
+            sriLiveState:="EXPANDING"
+
+        else
+
+            sriLiveState:="RECOVERING"
+
+        sriLastClose:=close
+
+    // Freeze the last confirmed observation when the window ends. Historical
+
+    // peak remains available; current market state is no longer being tracked.
+
+    string sriState=na(sriBar)?"NO SWEEP":sriInvalid?"INVALIDATED":not sriInWindow?"OBSERVATION ENDED":sriLiveState
+
+    float sriPeakDistance=not na(sriATR) and sriATR>0 and not na(sriBest)?math.max(0.0,(sriDir==1?sriBest-sriExtreme:sriExtreme-sriBest)/sriATR):na
+
+    float sriCurrentDistance=not na(sriATR) and sriATR>0 and not na(sriLastClose)?(sriDir==1?sriLastClose-sriExtreme:sriExtreme-sriLastClose)/sriATR:na
+
+    string sriQuality=na(sriBar)?"NONE":sriWickPct>=0.35 and sriCloseBack>=0.08?"WICK + RECLAIM":sriCloseBack>=0.05?"RECLAIM":"SHALLOW"
+
+    string sriPeakText=na(sriPeakDistance)?"--":str.tostring(sriPeakDistance,"#.##")+" ATR"
+
+    string sriCurrentText=na(sriCurrentDistance)?"--":str.tostring(sriCurrentDistance,"#.##")+" ATR"+(sriInvalid or not sriInWindow?" (LAST)":"")
+
+    // ============================================================================
+
+
+
+    // Research classification is DISPLAY ONLY. Never referenced by \`ready\`.
+
+    int evidence=(bias4==1?1:bias4==-1?-1:0)+(bias1==1?1:bias1==-1?-1:0)+(e20>e50?1:e20<e50?-1:0)
+
+    string pressure=math.abs(evidence)<2?"NEUTRAL":active?(evidence*dir>0?"ALIGNED":"CONFLICT"):evidence>0?"BULL WATCH":"BEAR WATCH"
+
+    // Visual NAV: retire the old segment and start a NEW horizontal line when the
+
+    // nearest active pool changes. No plot() series joins distinct prices.
+
+    if barstate.islast
+
+        if not na(navBSL)
+
+            line.delete(navBSL)
+
+            navBSL:=na
+
+        if not na(navSSL)
+
+            line.delete(navSSL)
+
+            navSSL:=na
+
+        if showLiq and not na(upper)
+
+            navBSL:=line.new(math.max(0,bar_index-navLength),upper,bar_index+4,upper,xloc=xloc.bar_index,color=color.new(color.red,58),width=1,style=line.style_dashed)
+
+        if showLiq and not na(lower)
+
+            navSSL:=line.new(math.max(0,bar_index-navLength),lower,bar_index+4,lower,xloc=xloc.bar_index,color=color.new(color.teal,58),width=1,style=line.style_dashed)
+
+    // ============================================================================
+
+    // VISUAL-ONLY DAILY REFERENCE OVERLAY. PDH / PDL use the existing confirmed
+
+    // TradingView daily series. NY TDO is the OPEN of the first available M5 bar
+
+    // on the new NY calendar date; on markets without a midnight bar it is the
+
+    // first available bar, not an invented midnight transaction price.
+
+    // ============================================================================
+
+    int nyDayKey=year(time,"America/New_York")*10000+month(time,"America/New_York")*100+dayofmonth(time,"America/New_York")
+
+    var int lastNyDayKey=na
+
+    var float nyTdo=na
+
+    var int nyTdoStart=na
+
+    // Track the exchange daily session start for the PDH / PDL reference lines.
+
+    var int tvDayStart=na
+
+    if na(tvDayStart) or ta.change(time("D")) != 0
+
+        tvDayStart:=bar_index
+
+    if na(lastNyDayKey) or nyDayKey!=lastNyDayKey
+
+        nyTdo:=open
+
+        nyTdoStart:=bar_index
+
+        lastNyDayKey:=nyDayKey
+
+    float tvTdo=request.security(syminfo.tickerid,"D",open,lookahead=barmerge.lookahead_on)
+
+    float displayTdo=tdoMode=="New York midnight"?nyTdo:tvTdo
+
+    // ============================================================================
+    // DAILY PIVOT FLOW ENGINE - RESEARCH ONLY
+    // ============================================================================
+    float pfRange=not na(pdh) and not na(pdl)?pdh-pdl:na
+    float pfMid=not na(pfRange)?(pdh+pdl)/2.0:na
+    float pfUpperPivot=not na(pfRange)?pfMid+pfRange*0.25:na
+    float pfUpperExt=not na(pfRange)?pfMid+pfRange*0.50:na
+    float pfLowerPivot=not na(pfRange)?pfMid-pfRange*0.25:na
+    float pfLowerExt=not na(pfRange)?pfMid-pfRange*0.50:na
+    float pfZone=atr*pivotZoneATR
+    float pfApproach=atr*pivotApproachATR
+
+    float pfFocus=na
+    string pfFocusName="NONE"
+    if showPivotFlow and not na(pfMid)
+        pfFocus:=pfMid
+        pfFocusName:="MID"
+        if math.abs(close-pfUpperPivot)<math.abs(close-pfFocus)
+            pfFocus:=pfUpperPivot
+            pfFocusName:="UPPER PIVOT"
+        if math.abs(close-pfUpperExt)<math.abs(close-pfFocus)
+            pfFocus:=pfUpperExt
+            pfFocusName:="UPPER EXT"
+        if math.abs(close-pfLowerPivot)<math.abs(close-pfFocus)
+            pfFocus:=pfLowerPivot
+            pfFocusName:="LOWER PIVOT"
+        if math.abs(close-pfLowerExt)<math.abs(close-pfFocus)
+            pfFocus:=pfLowerExt
+            pfFocusName:="LOWER EXT"
+
+    bool pfInZone=not na(pfFocus) and high>=pfFocus-pfZone and low<=pfFocus+pfZone
+    bool pfNear=not na(pfFocus) and math.abs(close-pfFocus)<=pfApproach
+    bool pfBreakUp=confirmed and not na(pfFocus) and close>pfFocus+pfZone and close[1]<=pfFocus+pfZone
+    bool pfBreakDn=confirmed and not na(pfFocus) and close<pfFocus-pfZone and close[1]>=pfFocus-pfZone
+
+    var int pfEventDir=0
+    var float pfEventLevel=na
+    var string pfEventName="NONE"
+    var string pfEventState="NONE"
+    var int pfEventBar=na
+    var int pfBeyondCount=0
+
+    if confirmed and showPivotFlow and not na(pfFocus)
+        if pfBreakUp
+            pfEventDir:=1
+            pfEventLevel:=pfFocus
+            pfEventName:=pfFocusName
+            pfEventState:="BREAK UP"
+            pfEventBar:=bar_index
+            pfBeyondCount:=1
+        else if pfBreakDn
+            pfEventDir:=-1
+            pfEventLevel:=pfFocus
+            pfEventName:=pfFocusName
+            pfEventState:="BREAK DOWN"
+            pfEventBar:=bar_index
+            pfBeyondCount:=1
+        else if pfEventDir!=0 and not na(pfEventLevel)
+            bool pfEventTouch=high>=pfEventLevel-pfZone and low<=pfEventLevel+pfZone
+            bool pfHeldBeyond=pfEventDir==1?close>pfEventLevel+pfZone:close<pfEventLevel-pfZone
+            bool pfFailedBack=pfEventDir==1?close<pfEventLevel-pfZone:close>pfEventLevel+pfZone
+            if pfHeldBeyond
+                pfBeyondCount+=1
+                if pfBeyondCount>=pivotAcceptBars
+                    pfEventState:=pfEventDir==1?"ACCEPTED ABOVE":"ACCEPTED BELOW"
+            else
+                pfBeyondCount:=0
+            if pfEventTouch and bar_index>pfEventBar
+                if pfEventDir==1
+                    pfEventState:=close>pfEventLevel+pfZone?"RETEST HELD":"RETESTING"
+                else
+                    pfEventState:=close<pfEventLevel-pfZone?"RETEST REJECTED":"RETESTING"
+            if pfFailedBack
+                pfEventState:=pfEventDir==1?"RECLAIM FAILED":"RECLAIMED ABOVE"
+                pfEventDir:=-pfEventDir
+                pfEventBar:=bar_index
+                pfBeyondCount:=1
+
+    string pfFlow=pfEventDir==1?"BULLISH":pfEventDir==-1?"BEARISH":pfNear or pfInZone?"TRANSITION":"NEUTRAL"
+
+    float pfNext=na
+    string pfNextName="NONE"
+    if pfEventDir==1 and not na(pfMid)
+        if close<pfLowerPivot
+            pfNext:=pfLowerPivot
+            pfNextName:="LOWER PIVOT"
+        else if close<pfMid
+            pfNext:=pfMid
+            pfNextName:="MID"
+        else if close<pfUpperPivot
+            pfNext:=pfUpperPivot
+            pfNextName:="UPPER PIVOT"
+        else
+            pfNext:=pfUpperExt
+            pfNextName:="UPPER EXT"
+    else if pfEventDir==-1 and not na(pfMid)
+        if close>pfUpperPivot
+            pfNext:=pfUpperPivot
+            pfNextName:="UPPER PIVOT"
+        else if close>pfMid
+            pfNext:=pfMid
+            pfNextName:="MID"
+        else if close>pfLowerPivot
+            pfNext:=pfLowerPivot
+            pfNextName:="LOWER PIVOT"
+        else
+            pfNext:=pfLowerExt
+            pfNextName:="LOWER EXT"
+
+    string pfEventText=pfEventName=="NONE"?(pfNear?"APPROACH "+pfFocusName:pfInZone?"TEST "+pfFocusName:"NONE"):pfEventName+" | "+pfEventState
+    string pfNextText=na(pfNext)?"--":pfNextName+" | "+str.tostring(pfNext,format.mintick)
+
+    var line pfUE=na
+    var line pfUP=na
+    var line pfMD=na
+    var line pfLP=na
+    var line pfLE=na
+    var label pfUETag=na
+    var label pfUPTag=na
+    var label pfMDTag=na
+    var label pfLPTag=na
+    var label pfLETag=na
+
+    if barstate.islast
+        if not na(pfUE)
+            line.delete(pfUE)
+        if not na(pfUP)
+            line.delete(pfUP)
+        if not na(pfMD)
+            line.delete(pfMD)
+        if not na(pfLP)
+            line.delete(pfLP)
+        if not na(pfLE)
+            line.delete(pfLE)
+        if not na(pfUETag)
+            label.delete(pfUETag)
+        if not na(pfUPTag)
+            label.delete(pfUPTag)
+        if not na(pfMDTag)
+            label.delete(pfMDTag)
+        if not na(pfLPTag)
+            label.delete(pfLPTag)
+        if not na(pfLETag)
+            label.delete(pfLETag)
+        if showPivotFlow and not na(pfMid)
+            int pfLeft=na(tvDayStart)?math.max(0,bar_index-100):tvDayStart
+            int pfRight=bar_index+4
+            int pfTagX=bar_index+refLabelOffset
+            pfUE:=line.new(pfLeft,pfUpperExt,pfRight,pfUpperExt,xloc=xloc.bar_index,color=color.new(color.fuchsia,35),width=pivotLineWidth,style=line.style_dotted)
+            pfUP:=line.new(pfLeft,pfUpperPivot,pfRight,pfUpperPivot,xloc=xloc.bar_index,color=color.new(color.orange,25),width=pivotLineWidth,style=line.style_dotted)
+            pfMD:=line.new(pfLeft,pfMid,pfRight,pfMid,xloc=xloc.bar_index,color=color.new(color.gray,35),width=pivotLineWidth,style=line.style_dotted)
+            pfLP:=line.new(pfLeft,pfLowerPivot,pfRight,pfLowerPivot,xloc=xloc.bar_index,color=color.new(color.aqua,25),width=pivotLineWidth,style=line.style_dotted)
+            pfLE:=line.new(pfLeft,pfLowerExt,pfRight,pfLowerExt,xloc=xloc.bar_index,color=color.new(color.teal,35),width=pivotLineWidth,style=line.style_dotted)
+            if showPivotLabels
+                pfUETag:=label.new(pfTagX,pfUpperExt,"PF UPPER EXT "+str.tostring(pfUpperExt,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.fuchsia,55),textcolor=color.white,size=size.tiny)
+                pfUPTag:=label.new(pfTagX,pfUpperPivot,"PF UPPER PIVOT "+str.tostring(pfUpperPivot,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.orange,50),textcolor=color.white,size=size.tiny)
+                pfMDTag:=label.new(pfTagX,pfMid,"PF MID "+str.tostring(pfMid,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.gray,55),textcolor=color.white,size=size.tiny)
+                pfLPTag:=label.new(pfTagX,pfLowerPivot,"PF LOWER PIVOT "+str.tostring(pfLowerPivot,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.aqua,55),textcolor=color.white,size=size.tiny)
+                pfLETag:=label.new(pfTagX,pfLowerExt,"PF LOWER EXT "+str.tostring(pfLowerExt,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.teal,55),textcolor=color.white,size=size.tiny)
+
+
+    var line pdhGuide=na
+
+    var line pdlGuide=na
+
+    var line tdoGuide=na
+
+    var label pdhTag=na
+
+    var label pdlTag=na
+
+    var label tdoTag=na
+
+    if barstate.islast
+
+        if not na(pdhGuide)
+
+            line.delete(pdhGuide)
+
+        if not na(pdlGuide)
+
+            line.delete(pdlGuide)
+
+        if not na(tdoGuide)
+
+            line.delete(tdoGuide)
+
+        if not na(pdhTag)
+
+            label.delete(pdhTag)
+
+        if not na(pdlTag)
+
+            label.delete(pdlTag)
+
+        if not na(tdoTag)
+
+            label.delete(tdoTag)
+
+        int xLeft=na(tvDayStart)?bar_index:tvDayStart
+
+        int xRight=bar_index+4
+
+        // Daily labels sit farther right than the contextual FVG CE labels (+4 bars).
+
+        int xTag=bar_index+refLabelOffset
+
+        if showPDH and not na(pdh)
+
+            pdhGuide:=line.new(xLeft,pdh,xRight,pdh,xloc=xloc.bar_index,color=color.rgb(255,105,105),width=refLineWidth,style=line.style_dashed)
+
+            pdhTag:=label.new(xTag,pdh,"PDH  "+str.tostring(pdh,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.rgb(130,39,45),textcolor=color.white,size=size.small)
+
+        if showPDL and not na(pdl)
+
+            pdlGuide:=line.new(xLeft,pdl,xRight,pdl,xloc=xloc.bar_index,color=color.rgb(42,211,172),width=refLineWidth,style=line.style_dashed)
+
+            pdlTag:=label.new(xTag,pdl,"PDL  "+str.tostring(pdl,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.rgb(13,104,83),textcolor=color.white,size=size.small)
+
+        if showTDO and not na(displayTdo)
+
+            int tdoLeft=tdoMode=="New York midnight"?nyTdoStart:xLeft
+
+            tdoGuide:=line.new(tdoLeft,displayTdo,xRight,displayTdo,xloc=xloc.bar_index,color=color.rgb(255,207,65),width=refLineWidth,style=line.style_dashed)
+
+            tdoTag:=label.new(xTag,displayTdo,"TDO  "+str.tostring(displayTdo,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.rgb(142,103,17),textcolor=color.white,size=size.small)
+
+    // ============================================================================
+
+    // Target guides are observational drawings. Only the existing READY boolean
+
+    // can promote provisional geometry into an executable projection.
+
+    if barstate.islast
+
+        if not na(guideEntry)
+
+            line.delete(guideEntry)
+
+            guideEntry:=na
+
+        if not na(guideStop)
+
+            line.delete(guideStop)
+
+            guideStop:=na
+
+        if not na(guideTarget)
+
+            line.delete(guideTarget)
+
+            guideTarget:=na
+
+        if not na(guideLabel)
+
+            label.delete(guideLabel)
+
+            guideLabel:=na
+
+        bool readyProjection=consumed and not na(entry) and not na(stop) and not na(target)
+
+        bool provisionalProjection=active and gap and not na(ce) and not na(structuralStop) and not na(bestTarget)
+
+        if showTargetGuides and (readyProjection or provisionalProjection)
+
+            float drawEntry=readyProjection?entry:ce
+
+            float drawStop=readyProjection?stop:structuralStop
+
+            float drawTarget=readyProjection?target:bestTarget
+
+            color guideColor=readyProjection?color.lime:color.new(color.yellow,45)
+
+            guideEntry:=line.new(bar_index,drawEntry,bar_index+8,drawEntry,color=guideColor,style=line.style_dotted)
+
+            guideStop:=line.new(bar_index,drawStop,bar_index+8,drawStop,color=color.new(color.red,readyProjection?15:60),style=line.style_dotted)
+
+            guideTarget:=line.new(bar_index,drawTarget,bar_index+8,drawTarget,color=guideColor,style=line.style_dashed,width=2)
+
+            guideLabel:=label.new(bar_index+8,drawTarget,(readyProjection?"READY TP ":"PROVISIONAL TP ")+str.tostring(drawTarget,format.mintick),style=label.style_label_left,color=readyProjection?color.new(color.green,15):color.new(color.gray,30),textcolor=color.white,size=size.small)
+
+    // CE guide is presentation-only. The existing CE, rejection and READY calculations above remain untouched.
+
+    // Use one last-bar horizontal guide and label, not a stepped plot between separate FVGs.
+
+    if barstate.islast
+
+        if not na(ceGuide)
+
+            line.delete(ceGuide)
+
+            ceGuide:=na
+
+        if not na(ceGuideLabel)
+
+            label.delete(ceGuideLabel)
+
+            ceGuideLabel:=na
+
+        if showZone and showCELabel and active and gap and not na(ce)
+
+            ceGuide:=line.new(bar_index,ce,bar_index+8,ce,xloc=xloc.bar_index,color=color.aqua,width=2,style=line.style_dashed)
+
+            ceGuideLabel:=label.new(bar_index+8,ce,branch+" CE 50%  "+str.tostring(ce,format.mintick),xloc=xloc.bar_index,style=label.style_label_left,color=color.new(color.teal,15),textcolor=color.white,size=size.small)
+
+    plot(active and gap?ce:na,"Active CE",color=color.aqua,linewidth=2,style=plot.style_linebr)
+
+    plot(consumed?entry:na,"Last READY entry",display=display.data_window)
+
+    plot(consumed?stop:na,"Last READY stop",display=display.data_window)
+
+    plot(consumed?target:na,"Last READY target",display=display.data_window)
+
+    plot(consumed?rr:na,"Last READY RR",display=display.data_window)
+
+    // Dashboard is display-only: no status string or context classification gates READY.
+
+    string nextStep=not onM5?"SWITCH TO 5M":active?not mss?"WAIT M5 MSS":not disp?"WAIT DISPLACEMENT":not gap?"WAIT CLOSED 15M FVG / IFVG":not geometry?"WAIT VALID >=2R TARGET":"WAIT CE RETEST + M5 REJECTION":consumed?"READY EVENT RECORDED":"WAIT QUALIFIED SWEEP"
+
+    string setupStage=not active and not consumed?"NO ACTIVE SETUP":consumed?"READY RECORDED":mss?(disp?(gap?"ZONE CONFIRMED":"DISP CONFIRMED"):"MSS CONFIRMED"):"SWEEP LOCKED"
+
+    bool validProvisional=active and gap and geometry and not na(bestTarget)
+
+    string targetState=consumed and not na(target)?"READY TP":validProvisional?"PROVISIONAL >=2R":active and gap?"NO VALID >=2R TARGET":"PENDING"
+
+    string targetValue=consumed and not na(target)?str.tostring(target,format.mintick):validProvisional?str.tostring(bestTarget,format.mintick):"--"
+
+    string entryValue=consumed and not na(entry)?str.tostring(entry,format.mintick):active and gap?str.tostring(ce,format.mintick):"--"
+
+    string stopValue=consumed and not na(stop)?str.tostring(stop,format.mintick):active and gap?str.tostring(structuralStop,format.mintick):"--"
+
+    string rrValue=consumed and not na(rr)?str.tostring(rr,"#.##")+"R":validProvisional?str.tostring(projectedRR,"#.##")+"R":"--"
+
+    // Informational 4H clock only. time_close("240") follows the symbol's exchange 4H bars.
+
+    // timenow updates only when TradingView executes the script (normally on incoming ticks).
+
+    int fourHClose=time_close("240")
+
+    int fourHRemaining=not na(fourHClose)?math.max(0,int(math.floor((fourHClose-timenow)/1000))):0
+
+    int fourHHours=int(math.floor(fourHRemaining/3600))
+
+    int fourHMinutes=int(math.floor(fourHRemaining%3600/60))
+
+    int fourHSeconds=fourHRemaining%60
+
+    string fourHCountdown=not na(fourHClose)?str.tostring(fourHHours,"00")+":"+str.tostring(fourHMinutes,"00")+":"+str.tostring(fourHSeconds,"00"):"N/A"
+
+    // CLOSED is shown on the confirmed final M5 bar of a 4H candle, otherwise OPEN.
+
+    bool fourHBoundary=onM5 and barstate.isconfirmed and not na(fourHClose) and time_close==fourHClose
+
+    string fourHCandleState=fourHBoundary?"CLOSED":"OPEN"
+
+    string fvgCeState=active and gap and not na(ce)?branch+" | CE "+str.tostring(ce,format.mintick):"WAIT CLOSED 15M GAP"
+
+    // Dashboard presentation only. The execution and research calculations above are unchanged.
+
+    var table dash=table.new(position.top_right,2,28,bgcolor=color.new(color.black,17),frame_color=color.new(color.gray,60),frame_width=1)
+
+    if barstate.islast
+
+        table.clear(dash,0,0,1,27)
+
+        if showDash
+
+            bool compact= dashMode=="Compact"
+
+            bool showTrade=active or consumed
+
+            string shortStatus=status=="15M GAP TIMEOUT"?"GAP TIMEOUT":status=="DISPLACEMENT"?"DISP ✓":status
+
+            string shortNext=not onM5?"USE M5":active?not mss?"WAIT MSS":not disp?"WAIT DISP":not gap?"WAIT 15M GAP":not geometry?"WAIT >=2R":"WAIT CE + M5":consumed?"READY RECORDED":"WAIT SWEEP"
+
+            string bullCe=ctxBullState==0?"--":str.tostring((ctxBullTop+ctxBullBottom)/2.0,format.mintick)
+
+            string bearCe=ctxBearState==0?"--":str.tostring((ctxBearTop+ctxBearBottom)/2.0,format.mintick)
+
+            string reactOwner=na(sriBar)?"NONE":sriOwner+(sriDir==1?" SSL ↑":" BSL ↓")
+
+            string peakNow=showSRI?sriPeakText+" / "+sriCurrentText:"HIDDEN"
+
+            string execCe=active and gap?str.tostring(ce,format.mintick):consumed?"READY RECORDED":"NONE"
+
+            string biasText=(bias4==1?"BULL":bias4==-1?"BEAR":"NEUT")+" / "+(bias1==1?"BULL":bias1==-1?"BEAR":"NEUT")
+
+            string dailyRef=(showTDO and not na(displayTdo)?(close>=displayTdo?"ABOVE TDO":"BELOW TDO"):"TDO OFF")+" | "+(showPDL and not na(pdl)?(close>=pdl?"ABOVE PDL":"BELOW PDL"):"PDL OFF")
+
+            table.cell(dash,0,0,"ALGOMIND",text_color=color.white,bgcolor=color.new(color.blue,45),text_size=size.small)
+
+            table.cell(dash,1,0,"v1.0.10 | M5",text_color=color.white,bgcolor=color.new(color.blue,45),text_size=size.small)
+
+            if compact
+
+                table.cell(dash,0,1,"EXEC",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,1,onM5?shortStatus:"USE M5",text_color=consumed?color.lime:color.white,text_size=size.small)
+
+                table.cell(dash,0,2,"NEXT",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,2,shortNext,text_color=color.yellow,text_size=size.small)
+
+                table.cell(dash,0,3,"BIAS 4H/1H",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,3,biasText,text_color=color.white,text_size=size.small)
+
+                table.cell(dash,0,4,"SWEEP",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,4,owner==""?"NONE":owner,text_color=color.white,text_size=size.small)
+
+                table.cell(dash,0,5,"15M BULL CE",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,5,bullCe,text_color=color.teal,text_size=size.small)
+
+                table.cell(dash,0,6,"15M BEAR CE",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,6,bearCe,text_color=color.orange,text_size=size.small)
+
+                table.cell(dash,0,7,"EXEC FVG",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,7,execCe,text_color=color.aqua,text_size=size.small)
+
+                table.cell(dash,0,8,"REACTION",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,8,showSRI?sriState:"HIDDEN",text_color=sriInvalid?color.red:color.white,text_size=size.small)
+
+                table.cell(dash,0,9,"PEAK / NOW",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,9,peakNow,text_color=color.aqua,text_size=size.small)
+
+                table.cell(dash,0,10,"FOLLOW",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,10,showSRI?(sriFollow?"YES":"WAIT"):"HIDDEN",text_color=color.white,text_size=size.small)
+
+                table.cell(dash,0,11,"DAILY REF",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,11,dailyRef,text_color=color.yellow,text_size=size.tiny)
+
+                table.cell(dash,0,12,"4H CLOSE",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,12,show4HClock?fourHCountdown:"HIDDEN",text_color=color.yellow,text_size=size.small)
+
+                table.cell(dash,0,13,"4H CANDLE",text_color=color.silver,text_size=size.tiny)
+
+                table.cell(dash,1,13,show4HClock?fourHCandleState:"HIDDEN",text_color=fourHBoundary?color.lime:color.white,text_size=size.small)
+
+                if showTrade
+
+                    table.cell(dash,0,14,"ENTRY / SL",text_color=color.silver,text_size=size.tiny)
+
+                    table.cell(dash,1,14,entryValue+" / "+stopValue,text_color=color.white,text_size=size.small)
+
+                    table.cell(dash,0,15,"TP / RR",text_color=color.silver,text_size=size.tiny)
+
+                    table.cell(dash,1,15,targetValue+" / "+rrValue,text_color=color.white,text_size=size.small)
+
+            else
+
+                table.cell(dash,0,0,"ALGOMIND UNIFIED",text_color=color.white,bgcolor=color.new(color.blue,45))
+
+                table.cell(dash,1,0,"v1.0.10 | M5",text_color=color.white,bgcolor=color.new(color.blue,45))
+
+                table.cell(dash,0,1,"EXEC STATUS",text_color=color.silver)
+
+                table.cell(dash,1,1,onM5?status:"SWITCH TO 5M",text_color=consumed?color.lime:color.white)
+
+                table.cell(dash,0,2,"NEXT REQUIRED",text_color=color.silver)
+
+                table.cell(dash,1,2,nextStep,text_color=color.yellow)
+
+                table.cell(dash,0,3,"SWEEP OWNER",text_color=color.silver)
+
+                table.cell(dash,1,3,owner==""?"NONE":owner,text_color=color.white)
+
+                table.cell(dash,0,4,"PROGRESS",text_color=color.silver)
+
+                table.cell(dash,1,4,setupStage+" | "+(gap?branch:"15M GAP ○"),text_color=color.white)
+
+                table.cell(dash,0,5,"EXEC BIAS 4H/1H",text_color=color.silver)
+
+                table.cell(dash,1,5,str.tostring(bias4)+" / "+str.tostring(bias1),text_color=color.white)
+
+                table.cell(dash,0,6,"FUSION ST / PZ",text_color=color.silver)
+
+                table.cell(dash,1,6,fusionBias+" / "+pressure,text_color=color.white)
+
+                table.cell(dash,0,7,"TARGET STATUS",text_color=color.silver)
+
+                table.cell(dash,1,7,targetState,text_color=consumed?color.lime:validProvisional?color.yellow:color.silver)
+
+                table.cell(dash,0,8,"ENTRY / STOP",text_color=color.silver)
+
+                table.cell(dash,1,8,entryValue+" / "+stopValue,text_color=color.white)
+
+                table.cell(dash,0,9,"TARGET",text_color=color.silver)
+
+                table.cell(dash,1,9,targetValue,text_color=consumed?color.lime:color.white)
+
+                table.cell(dash,0,10,"REALISTIC RR",text_color=color.silver)
+
+                table.cell(dash,1,10,rrValue,text_color=consumed?color.lime:color.white)
+
+                table.cell(dash,0,11,"15M FVG / CE",text_color=color.silver)
+
+                table.cell(dash,1,11,fvgCeState,text_color=active and gap?color.aqua:color.silver)
+
+                table.cell(dash,0,12,"NEXT 4H CLOSE",text_color=color.silver)
+
+                table.cell(dash,1,12,show4HClock?fourHCountdown:"HIDDEN",text_color=color.yellow)
+
+                table.cell(dash,0,13,"4H CANDLE",text_color=color.silver)
+
+                table.cell(dash,1,13,show4HClock?fourHCandleState:"HIDDEN",text_color=fourHBoundary?color.lime:color.white)
+
+                table.cell(dash,0,14,"15M BULL CONTEXT",text_color=color.silver)
+
+                table.cell(dash,1,14,ctxBullState == 0 ? "NONE" : (ctxBullInverse ? "BEAR IFVG " : "BULL FVG ") + ctxStateName(ctxBullState) + " | CE " + str.tostring((ctxBullTop + ctxBullBottom) / 2.0, format.mintick),text_color=color.teal)
+
+                table.cell(dash,0,15,"15M BEAR CONTEXT",text_color=color.silver)
+
+                table.cell(dash,1,15,ctxBearState == 0 ? "NONE" : (ctxBearInverse ? "BULL IFVG " : "BEAR FVG ") + ctxStateName(ctxBearState) + " | CE " + str.tostring((ctxBearTop + ctxBearBottom) / 2.0, format.mintick),text_color=color.orange)
+
+                table.cell(dash,0,16,"EXEC FVG / CE",text_color=color.silver)
+
+                table.cell(dash,1,16,active and gap ? "EXEC FVG ACTIVE | CE " + str.tostring(ce,format.mintick) : consumed ? "READY EVENT RECORDED" : "NO EXEC FVG",text_color=active and gap ? color.aqua : color.silver)
+
+                table.cell(dash,0,17,"SWEEP REACTION",text_color=color.silver)
+
+                table.cell(dash,1,17,showSRI?sriState:"HIDDEN",text_color=sriInvalid?color.red:sriState=="EXPANDING"?color.lime:color.silver)
+
+                table.cell(dash,0,18,"REACTION OWNER",text_color=color.silver)
+
+                table.cell(dash,1,18,showSRI?(na(sriBar)?"NONE":sriOwner+(sriDir==1?" SSL ↑":" BSL ↓")):"HIDDEN",text_color=color.white)
+
+                table.cell(dash,0,19,"REJECTION / FOLLOW",text_color=color.silver)
+
+                table.cell(dash,1,19,showSRI?(sriQuality+" / "+(sriFollow?"YES":"WAIT")):"HIDDEN",text_color=color.white)
+
+                table.cell(dash,0,20,"PEAK REACTION",text_color=color.silver)
+
+                table.cell(dash,1,20,showSRI?sriPeakText:"HIDDEN",text_color=color.aqua)
+
+                table.cell(dash,0,21,"CURRENT DISTANCE",text_color=color.silver)
+
+                table.cell(dash,1,21,showSRI?sriCurrentText:"HIDDEN",text_color=color.aqua)
+
+                table.cell(dash,0,22,"REACTION PHASE",text_color=color.silver)
+
+                table.cell(dash,1,22,showSRI?(sriFollow?"FOLLOW CONFIRMED":"FOLLOW WAIT")+(not na(sriPeakDistance) and sriPeakDistance>=sriStrongATR?" | PEAK >= THRESHOLD":""):"HIDDEN",text_color=color.white)
+
+                table.cell(dash,0,23,"DAILY REFERENCE",text_color=color.silver)
+
+                table.cell(dash,1,23,dailyRef,text_color=color.yellow)
+
+                // Hide trade fields when no setup is active or READY.
+
+                if not showTrade
+
+                    table.cell(dash,0,7,"",text_color=color.silver)
+
+                    table.cell(dash,1,7,"",text_color=color.silver)
+
+                    for r=8 to 10
+
+                        table.cell(dash,0,r,"",text_color=color.silver)
+
+                        table.cell(dash,1,r,"",text_color=color.silver)
+
+    // v1.0.10 RESEARCH INTEGRITY LOCK:
+    // Pivot Flow is not referenced by READY or EXEC calculations.
+    alertcondition(ready and dir==1,"AlgoMind Unified BUY READY","Confirmed BUY READY on AlgoMind Unified")
+
+    alertcondition(ready and dir==-1,"AlgoMind Unified SELL READY","Confirmed SELL READY on AlgoMind Unified")
