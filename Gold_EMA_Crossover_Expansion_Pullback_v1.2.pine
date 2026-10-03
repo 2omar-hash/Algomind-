@@ -1,0 +1,241 @@
+//@version=6
+strategy("Gold EMA Crossover Expansion Pullback v1.2", shorttitle="Gold EMA CEP v1.2",
+     overlay=true, pyramiding=0, process_orders_on_close=true, initial_capital=10000)
+
+// ============================================================================
+// STANDALONE RESEARCH STRATEGY — XAUUSD M15
+// Hypothesis: CROSS -> EXPANSION -> FIRST PB -> CONFIRM -> ENTRY -> fixed R target.
+// Crossover alone NEVER enters a trade.
+// ============================================================================
+
+string G1="1. EMA Regime"
+fastLen=input.int(20,"Fast EMA",minval=2,group=G1)
+slowLen=input.int(50,"Slow EMA",minval=3,group=G1)
+useH1=input.bool(true,"Require confirmed H1 EMA alignment at entry",group=G1)
+requireH1Slope=input.bool(false,"Require H1 EMA slopes aligned",group=G1)
+
+string G2="2. Expansion"
+minExpansionATR=input.float(0.20,"Min EMA separation / ATR",minval=0.0,step=0.05,group=G2)
+maxBarsToExpand=input.int(12,"Max bars from cross to expansion",minval=1,maxval=50,group=G2)
+requireFastSlope=input.bool(true,"Require fast EMA slope in cross direction",group=G2)
+slopeLookback=input.int(2,"Fast EMA slope lookback",minval=1,maxval=10,group=G2)
+
+string G3="3. First Pullback"
+pullbackMode=input.string("EMA20","Pullback zone",options=["EMA20","EMA20-50 Band"],group=G3)
+touchATR=input.float(0.10,"EMA20 touch tolerance (ATR)",minval=0.0,step=0.05,group=G3)
+maxBarsToPB=input.int(16,"Max bars from expansion to pullback",minval=1,maxval=60,group=G3)
+requireRejectColor=input.bool(true,"Require rejection candle direction",group=G3)
+requireCloseBack=input.bool(true,"Require rejection close through EMA20",group=G3)
+
+string G4="4. Confirmation"
+requireBreak=input.bool(true,"Require break of rejection candle",group=G4)
+confirmWindow=input.int(3,"Confirmation window after PB",minval=1,maxval=10,group=G4)
+
+string G5="5. Risk / Exit"
+rrTarget=input.float(2.0,"Take-profit R multiple",minval=0.5,step=0.25,group=G5)
+swingLookback=input.int(5,"Structural stop lookback",minval=2,maxval=30,group=G5)
+stopBufferATR=input.float(0.10,"Stop buffer ATR",minval=0.0,step=0.05,group=G5)
+minRiskATR=input.float(0.20,"Minimum stop distance ATR",minval=0.05,step=0.05,group=G5)
+maxRiskATR=input.float(2.00,"Maximum stop distance ATR",minval=0.25,step=0.25,group=G5)
+
+string G6="6. Test Controls"
+longs=input.bool(true,"Enable longs",group=G6)
+shorts=input.bool(true,"Enable shorts",group=G6)
+sessionFilter=input.bool(false,"Use New York session filter",group=G6)
+nySession=input.session("0830-1200","New York session",group=G6)
+showLifecycle=input.bool(true,"Show CROSS / EXP / PB / ENTRY markers",group=G6)
+showStatus=input.bool(true,"Show lifecycle dashboard",group=G6)
+
+// M15 research guard
+onM15=timeframe.isminutes and timeframe.multiplier==15
+
+atr=ta.atr(14)
+emaFast=ta.ema(close,fastLen)
+emaSlow=ta.ema(close,slowLen)
+plot(emaFast,"EMA20",color=color.blue,linewidth=2)
+plot(emaSlow,"EMA50",color=color.orange,linewidth=2)
+
+bullCross=ta.crossover(emaFast,emaSlow)
+bearCross=ta.crossunder(emaFast,emaSlow)
+fastUp=emaFast>emaFast[slopeLookback]
+fastDown=emaFast<emaFast[slopeLookback]
+sepATR=atr>0?math.abs(emaFast-emaSlow)/atr:0.0
+bullExpansion=emaFast>emaSlow and sepATR>=minExpansionATR and (not requireFastSlope or fastUp)
+bearExpansion=emaFast<emaSlow and sepATR>=minExpansionATR and (not requireFastSlope or fastDown)
+
+[h1Fast,h1Slow,h1FastPrev,h1SlowPrev]=request.security(
+     syminfo.tickerid,"60",
+     [ta.ema(close,fastLen)[1],ta.ema(close,slowLen)[1],
+      ta.ema(close,fastLen)[2],ta.ema(close,slowLen)[2]],
+     lookahead=barmerge.lookahead_on)
+h1Bull=h1Fast>h1Slow and (not requireH1Slope or (h1Fast>h1FastPrev and h1Slow>h1SlowPrev))
+h1Bear=h1Fast<h1Slow and (not requireH1Slope or (h1Fast<h1FastPrev and h1Slow<h1SlowPrev))
+inSession=not sessionFilter or not na(time(timeframe.period,nySession,"America/New_York"))
+
+// Lifecycle: 0 idle, 1 cross candidate, 2 expansion confirmed, 3 PB waiting confirmation
+var int regimeDir=0
+var int stage=0
+var int crossBar=na
+var int expansionBar=na
+var int pbBar=na
+var float pbTrigger=na
+var float pbExtreme=na
+var int crosses=0
+var int expansions=0
+var int failedExpansions=0
+var int pullbacks=0
+
+if onM15 and bullCross
+    if stage==1
+        failedExpansions+=1
+    regimeDir:=1
+    stage:=1
+    crossBar:=bar_index
+    expansionBar:=na
+    pbBar:=na
+    pbTrigger:=na
+    pbExtreme:=na
+    crosses+=1
+
+if onM15 and bearCross
+    if stage==1
+        failedExpansions+=1
+    regimeDir:=-1
+    stage:=1
+    crossBar:=bar_index
+    expansionBar:=na
+    pbBar:=na
+    pbTrigger:=na
+    pbExtreme:=na
+    crosses+=1
+
+// Cross must prove expansion before timeout.
+if stage==1
+    bool oppositeCross=(regimeDir==1 and bearCross) or (regimeDir==-1 and bullCross)
+    bool timedOut=bar_index-crossBar>maxBarsToExpand
+    if oppositeCross or timedOut
+        if timedOut
+            failedExpansions+=1
+        if timedOut
+            stage:=0
+            regimeDir:=0
+    else if (regimeDir==1 and bullExpansion) or (regimeDir==-1 and bearExpansion)
+        stage:=2
+        expansionBar:=bar_index
+        expansions+=1
+
+// Expansion remains directionally valid while waiting for FIRST pullback.
+if stage==2
+    bool regimeBroken=(regimeDir==1 and emaFast<=emaSlow) or (regimeDir==-1 and emaFast>=emaSlow)
+    bool pbTimeout=bar_index-expansionBar>maxBarsToPB
+    if regimeBroken or pbTimeout
+        stage:=0
+        regimeDir:=0
+
+bandTop=math.max(emaFast,emaSlow)
+bandBottom=math.min(emaFast,emaSlow)
+bullTouch=pullbackMode=="EMA20"?(low<=emaFast+atr*touchATR and high>=emaFast-atr*touchATR):(low<=bandTop and high>=bandBottom)
+bearTouch=pullbackMode=="EMA20"?(high>=emaFast-atr*touchATR and low<=emaFast+atr*touchATR):(high>=bandBottom and low<=bandTop)
+bullReject=bullTouch and (not requireRejectColor or close>open) and (not requireCloseBack or close>emaFast)
+bearReject=bearTouch and (not requireRejectColor or close<open) and (not requireCloseBack or close<emaFast)
+
+newBullPB=stage==2 and regimeDir==1 and bar_index>expansionBar and bullReject
+newBearPB=stage==2 and regimeDir==-1 and bar_index>expansionBar and bearReject
+
+if newBullPB
+    stage:=3
+    pbBar:=bar_index
+    pbTrigger:=high
+    pbExtreme:=low
+    pullbacks+=1
+if newBearPB
+    stage:=3
+    pbBar:=bar_index
+    pbTrigger:=low
+    pbExtreme:=high
+    pullbacks+=1
+
+// PB confirmation or failure.
+bool bullConfirm=stage==3 and regimeDir==1 and bar_index>pbBar and close>pbTrigger
+bool bearConfirm=stage==3 and regimeDir==-1 and bar_index>pbBar and close<pbTrigger
+bool pbExpired=stage==3 and bar_index-pbBar>confirmWindow
+bool pbRegimeBroken=stage==3 and ((regimeDir==1 and emaFast<=emaSlow) or (regimeDir==-1 and emaFast>=emaSlow))
+if pbExpired or pbRegimeBroken
+    stage:=0
+    regimeDir:=0
+
+h1OK=(regimeDir==1 and (not useH1 or h1Bull)) or (regimeDir==-1 and (not useH1 or h1Bear))
+longSignal=onM15 and longs and inSession and h1OK and (requireBreak?bullConfirm:newBullPB)
+shortSignal=onM15 and shorts and inSession and h1OK and (requireBreak?bearConfirm:newBearPB)
+
+longSwing=ta.lowest(low,swingLookback)
+shortSwing=ta.highest(high,swingLookback)
+longSL=math.min(longSwing,nz(pbExtreme,longSwing))-atr*stopBufferATR
+shortSL=math.max(shortSwing,nz(pbExtreme,shortSwing))+atr*stopBufferATR
+longRisk=close-longSL
+shortRisk=shortSL-close
+longRiskOK=longRisk>=atr*minRiskATR and longRisk<=atr*maxRiskATR
+shortRiskOK=shortRisk>=atr*minRiskATR and shortRisk<=atr*maxRiskATR
+
+var float tradeEntry=na
+var float tradeStop=na
+var float tradeTarget=na
+
+if strategy.position_size==0
+    if longSignal and longRiskOK
+        tradeEntry:=close
+        tradeStop:=longSL
+        tradeTarget:=close+longRisk*rrTarget
+        strategy.entry("Long",strategy.long)
+        stage:=0
+        regimeDir:=0
+    else if shortSignal and shortRiskOK
+        tradeEntry:=close
+        tradeStop:=shortSL
+        tradeTarget:=close-shortRisk*rrTarget
+        strategy.entry("Short",strategy.short)
+        stage:=0
+        regimeDir:=0
+
+if strategy.position_size>0
+    strategy.exit("Long Exit","Long",stop=tradeStop,limit=tradeTarget)
+if strategy.position_size<0
+    strategy.exit("Short Exit","Short",stop=tradeStop,limit=tradeTarget)
+
+if strategy.position_size==0 and strategy.position_size[1]!=0
+    tradeEntry:=na
+    tradeStop:=na
+    tradeTarget:=na
+
+plot(strategy.position_size!=0?tradeEntry:na,"Entry",color=color.gray,style=plot.style_linebr)
+plot(strategy.position_size!=0?tradeStop:na,"SL",color=color.red,style=plot.style_linebr)
+plot(strategy.position_size!=0?tradeTarget:na,"TP",color=color.green,style=plot.style_linebr)
+
+plotshape(showLifecycle and bullCross,title="Bull Cross",style=shape.labelup,location=location.belowbar,color=color.green,textcolor=color.white,size=size.tiny,text="X UP")
+plotshape(showLifecycle and bearCross,title="Bear Cross",style=shape.labeldown,location=location.abovebar,color=color.red,textcolor=color.white,size=size.tiny,text="X DN")
+plotshape(showLifecycle and stage==2 and stage[1]==1 and regimeDir==1,title="Bull Expansion",style=shape.circle,location=location.belowbar,color=color.aqua,size=size.tiny,text="EXP")
+plotshape(showLifecycle and stage==2 and stage[1]==1 and regimeDir==-1,title="Bear Expansion",style=shape.circle,location=location.abovebar,color=color.aqua,size=size.tiny,text="EXP")
+plotshape(showLifecycle and newBullPB,title="Bull PB",style=shape.circle,location=location.belowbar,color=color.green,size=size.tiny,text="PB")
+plotshape(showLifecycle and newBearPB,title="Bear PB",style=shape.circle,location=location.abovebar,color=color.red,size=size.tiny,text="PB")
+plotshape(showLifecycle and longSignal and longRiskOK,title="BUY",style=shape.triangleup,location=location.belowbar,color=color.green,size=size.small,text="BUY")
+plotshape(showLifecycle and shortSignal and shortRiskOK,title="SELL",style=shape.triangledown,location=location.abovebar,color=color.red,size=size.small,text="SELL")
+
+string stageText=stage==0?"IDLE":stage==1?(regimeDir==1?"BULL CROSS - WAIT EXP":"BEAR CROSS - WAIT EXP"):stage==2?(regimeDir==1?"BULL EXP - WAIT PB":"BEAR EXP - WAIT PB"):(regimeDir==1?"BULL PB - WAIT CONF":"BEAR PB - WAIT CONF")
+var table dash=table.new(position.top_right,2,6,bgcolor=color.new(color.black,20))
+if barstate.islast
+    table.clear(dash,0,0,1,5)
+    if showStatus
+        table.cell(dash,0,0,"EMA CEP",text_color=color.white,bgcolor=color.new(color.blue,40))
+        table.cell(dash,1,0,"v1.2 | M15",text_color=color.white,bgcolor=color.new(color.blue,40))
+        table.cell(dash,0,1,"LIFECYCLE",text_color=color.silver)
+        table.cell(dash,1,1,onM15?stageText:"SWITCH TO M15",text_color=onM15?color.white:color.yellow)
+        table.cell(dash,0,2,"SEP / ATR",text_color=color.silver)
+        table.cell(dash,1,2,str.tostring(sepATR,"#.##"),text_color=sepATR>=minExpansionATR?color.lime:color.white)
+        table.cell(dash,0,3,"H1 20/50",text_color=color.silver)
+        table.cell(dash,1,3,h1Bull?"BULL":h1Bear?"BEAR":"NEUT",text_color=color.white)
+        table.cell(dash,0,4,"CROSS / EXP",text_color=color.silver)
+        table.cell(dash,1,4,str.tostring(crosses)+" / "+str.tostring(expansions),text_color=color.white)
+        table.cell(dash,0,5,"FAILED EXP / PB",text_color=color.silver)
+        table.cell(dash,1,5,str.tostring(failedExpansions)+" / "+str.tostring(pullbacks),text_color=color.white)
+
+bgcolor(not onM15?color.new(color.red,90):na,title="M15 only")
